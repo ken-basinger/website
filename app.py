@@ -43,18 +43,37 @@ def setup_pcloud():
 # --- 2. UPDATE THE SECURE MEDIA PROXY ROUTE ---
 # Change your existing proxy route to rely on the global client variable
 
-@app.route('/media/<path:filename>')
-def secure_media_proxy(filename):
-    global pcloud_client
-
-    if pcloud_client is None:
-        # Attempt initialization one last time if it failed earlier
-        pcloud_client = initialize_pcloud_client()
-        if pcloud_client is None:
-            return abort(503) # Service unavailable
-
-    # ... The rest of your proxy logic (getfile, content_type, Response) remains the same ...
-    # e.g., pcloud_path = f"/My Private Stories/Images/{filename}"
-    # file_data = pcloud_client.getfile(path=pcloud_path).read() 
-    # return Response(file_data, mimetype=content_type)
-    # ...
+@app.route('/')
+def test_connection():
+    db_status = "? FAILED"
+    pcloud_status = "? FAILED"
+    user_count = "N/A"
+    
+    # --- A. Test PostgreSQL Connection & Query ---
+    try:
+        # Connect using the secure DATABASE_URL variable
+        # sslmode='require' is essential for Render connections
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        
+        # Use RealDictCursor to fetch results as dictionary rows
+        cur = conn.cursor(cursor_factory=RealDictCursor) 
+        
+        # Test query: Count the number of users in your new table
+        cur.execute('SELECT COUNT(user_id) FROM writing.users;')
+        count_result = cur.fetchone()
+        user_count = count_result['count']
+        
+        db_status = f"? SUCCESS (User Count: {user_count})"
+        
+        cur.close()
+        conn.close()        # ... checks for user count from writing.users table ...
+    
+    except Exception as e:
+        db_status = f"? FAILED (DB Error: {e})"
+    
+    # --- B. Test pCloud Connection ---
+    # ... logic remains the same ...
+    
+    # --- C. Display Results ---
+    # ... HTML code to show the results ...
+    return render_template_string(html_content)
