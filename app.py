@@ -2,6 +2,7 @@ import os
 from flask import Flask, render_template_string, Response, abort
 # ... other imports ...
 from pcloud import PyCloud 
+from psycopg2.extras import RealDictCursor
 
 # --- 1. INITIALIZE APP (NO pCloud HERE YET) ---
 app = Flask(__name__)
