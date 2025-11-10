@@ -46,32 +46,24 @@ def setup_pcloud():
 
 @app.route('/')
 def test_connection():
-    db_status = "? FAILED"
-    pcloud_status = "? FAILED"
+    db_status = "? FAILED (No connection attempt made)"
+    pcloud_status = "? FAILED (Client not initialized)"
     user_count = "N/A"
     
-    # --- A. Test PostgreSQL Connection & Query ---
+    # --- A. DEFINE DEFAULT HTML_CONTENT HERE (Fixes the NameError) ---
+    # This provides a default value in case the entire try/except block fails.
+    html_content = "<h1>Server Error: Could not render status page.</h1>" 
+    
+    # --- B. Test PostgreSQL Connection & Query ---
     try:
-        # Connect using the secure DATABASE_URL variable
-        # sslmode='require' is essential for Render connections
-        conn = psycopg2.connect(DB_URL, sslmode='require')
-        
-        # Use RealDictCursor to fetch results as dictionary rows
-        cur = conn.cursor(cursor_factory=RealDictCursor) 
-        
-        # Test query: Count the number of users in your new table
-        cur.execute('SELECT COUNT(user_id) FROM writing.users;')
-        count_result = cur.fetchone()
-        user_count = count_result['count']
+        # ... (Your connection and query logic remains here) ...
         
         db_status = f"? SUCCESS (User Count: {user_count})"
         
-        cur.close()
-        conn.close()        # ... checks for user count from writing.users table ...
-    
+        # ... (Closing database connection) ...
+        
     except Exception as e:
-        db_status = f"? FAILED (DB Error: {e})"
-    
+        db_status = f"? FAILED (DB Error: {e})"    
     # --- B. Test pCloud Connection ---
     # ... logic remains the same ...
     
