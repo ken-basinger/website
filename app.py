@@ -1,8 +1,8 @@
 import os
 from flask import Flask, render_template_string, Response, abort
-# ... other imports ...
-from pcloud import PyCloud 
 from psycopg2.extras import RealDictCursor
+import psycopg2 # Make sure you have this import
+from pcloud import PyCloud
 
 # --- 1. INITIALIZE APP (NO pCloud HERE YET) ---
 app = Flask(__name__)
@@ -46,27 +46,57 @@ def setup_pcloud():
 
 @app.route('/')
 def test_connection():
-    db_status = "? FAILED (No connection attempt made)"
-    pcloud_status = "? FAILED (Client not initialized)"
+    # --- STATUS VARIABLES (Defined first) ---
+    DB_URL = os.environ.get('DATABASE_URL')
+    db_status = "? DB Connection FAILED"
+    pcloud_status = "? pCloud FAILED"
     user_count = "N/A"
     
-    # --- A. DEFINE DEFAULT HTML_CONTENT HERE (Fixes the NameError) ---
-    # This provides a default value in case the entire try/except block fails.
-    html_content = "<h1>Server Error: Could not render status page.</h1>" 
+    # Check pCloud status using the global client if initialized
+    global pcloud_client
+    if pcloud_client:
+        pcloud_status = "? pCloud Client Initialized"
     
-    # --- B. Test PostgreSQL Connection & Query ---
+    # --- TEMPORARY HTML OUTPUT (Defined second - FIXES NameError) ---
+    # This ensures 'html_content' always exists, even if the DB fails below.
+    # It will be overwritten if the DB connection succeeds.
+    html_content = "" 
+
+    # --- 1. Test PostgreSQL Connection & Query ---
     try:
-        # ... (Your connection and query logic remains here) ...
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Test query: Count users in your schema
+        # NOTE: If this fails, the table or schema name is wrong.
+        cur.execute('SELECT COUNT(user_id) FROM writing.users;') 
+        count_result = cur.fetchone()
+        user_count = count_result['count']
         
         db_status = f"? SUCCESS (User Count: {user_count})"
         
-        # ... (Closing database connection) ...
+        cur.close()
+        conn.close()
         
     except Exception as e:
-        db_status = f"? FAILED (DB Error: {e})"    
-    # --- B. Test pCloud Connection ---
-    # ... logic remains the same ...
+        # If the connection fails, capture the error message to display
+        db_status = f"? FAILED (DB Error: {e})"
     
-    # --- C. Display Results ---
-    # ... HTML code to show the results ...
+    # --- 2. FINAL DISPLAY RESULTS ---
+    # We define the HTML here, using the latest status of the variables
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><title>System Check</title></head>
+    <body style="font-family: sans-serif; padding: 20px;">
+        <h1>Application Server Status Check</h1>
+        <hr>
+        <p style="font-size: 1.2em;"><strong>PostgreSQL Connection & Query:</strong> {db_status}</p>
+        <p style="font-size: 1.2em;"><strong>pCloud Client Status:</strong> {pcloud_status}</p>
+        <p style="margin-top: 30px;">If the database count is 0, your table is correctly created but empty, which is normal.</p>
+    </body>
+    </html>
+    """
+    
+    # --- 3. RETURN STATEMENT ---
     return render_template_string(html_content)
