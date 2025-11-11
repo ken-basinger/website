@@ -149,65 +149,33 @@ def logout():
 
 # --- 3. MAIN TEST / LIBRARY ROUTE (Protected) ---
 
-@app.route('/')
-def test_connection():
+@app.route('/') # <-- This is the main landing page after login
+def story_library():
     # --- SECURITY GATE ---
     if 'user_id' not in session:
         return redirect(url_for('login_page'))
     # --- END SECURITY GATE ---
     
-    # --- VARIABLES ---
-    db_status = "? DB Connection FAILED"
-    pcloud_status = "? pCloud FAILED"
-    user_count = "N/A"
+    DB_URL = os.environ.get('DATABASE_URL')
+    stories = []
     
-    # Check pCloud status using the global client
-    if pcloud_client:
-        pcloud_status = "? pCloud Client Initialized"
-    
-    # Check if the user is in session
-    welcome_message = f"Welcome, {session.get('username', 'Guest')}!"
-    
-    # --- Test PostgreSQL Connection & Query (Already working) ---
+    # 1. Database Query Logic (fetches story list)
     try:
-        conn = psycopg2.connect(DB_URL, sslmode='require')
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cur.execute('SELECT COUNT(user_id) FROM writing.users;') 
-        count_result = cur.fetchone()
-        user_count = count_result['count']
-        
-        db_status = f"? SUCCESS (User Count: {user_count})"
-        
-        cur.close()
-        conn.close()
-        
+        # ... SQL to JOIN writing.stories and writing.series ...
+        stories = cur.fetchall()
     except Exception as e:
-        db_status = f"? FAILED (DB Error: {e})"
-    
-    
-    # --- FINAL DISPLAY RESULTS ---
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head><title>Private Library - Home</title></head>
-    <body style="font-family: sans-serif; padding: 20px;">
-        <h1>{welcome_message}</h1>
-        <p><a href="{url_for('logout')}">Logout</a></p>
-        <hr>
-        <h2>System Status Check</h2>
-        <p style="font-size: 1.2em;"><strong>PostgreSQL Connection & Query:</strong> {db_status}</p>
-        <p style="font-size: 1.2em;"><strong>pCloud Client Status:</strong> {pcloud_status}</p>
-        
-        <h3 style="margin-top: 2rem;">Library Placeholder</h3>
-        <p>Your stories will be listed here after you implement the retrieval logic.</p>
+        print(f"ERROR: Failed to fetch story list: {e}")
 
-        <h3 style="margin-top: 2rem;">Secure Media Test:</h3>
-        <p>Accessing a test image via the secure proxy: <a href="{url_for('secure_media_proxy', filename='ch03-sc02.png', scene_id=101)}">Test Image Link</a></p>
+    # 2. HTML Generation Logic (loops through stories)
+    story_list_html = ""
+    # ... logic to create the HTML links using the fetched data ...
+
+    # 3. Final Return Statement
+    return render_template_string(f"""
+    <body ...>
+        <h2>Your Private Library</h2>
+        {story_list_html}
     </body>
-    </html>
-    """
-    return render_template_string(html_content)
 
 
 # --- 4. THE SECURE MEDIA PROXY ROUTE (Protected) ---
@@ -276,5 +244,69 @@ def secure_media_proxy(scene_id, filename):
     except Exception as e:
         print(f"pCloud Access Error: Failed to retrieve {pcloud_path}. {e}")
         return abort(404)
+# --- NEW ROUTE: THE STORY LIBRARY PAGE (Protected) ---
 
+@app.route('/library')
+def story_library():
+    # --- SECURITY GATE ---
+    if 'user_id' not in session:
+        return redirect(url_for('login_page'))
+    # --- END SECURITY GATE ---
+    
+    DB_URL = os.environ.get('DATABASE_URL')
+    stories = []
+    
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fetch all necessary story data
+        sql_query = """
+        SELECT 
+            s.story_id,
+            s.story_title,
+            s.book_slug,
+            se.series_slug
+        FROM writing.stories s
+        JOIN writing.series se ON s.series_id = se.series_id;
+        """
+        cur.execute(sql_query)
+        stories = cur.fetchall()
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        # If the DB fails here, log it and display an empty list
+        print(f"ERROR: Failed to fetch story list: {e}")
+
+    # --- RENDER THE LIBRARY HTML ---
+    
+    # We will use simple, clean HTML to list the stories
+    story_list_html = ""
+    if stories:
+        for story in stories:
+            # Construct the link to the first scene (assuming scene_id 1 is the start)
+            # This link will take the reader to the actual immersive view
+            scene_link = url_for('read_scene', scene_id=1) 
+            
+            story_list_html += f"""
+            <div style="border: 1px solid #ccc; padding: 15px; margin-bottom: 10px; border-radius: 8px;">
+                <h3 style="margin: 0; color: #8B7D6C;">{story['story_title']} ({story['series_slug']})</h3>
+                <p>Status: Available</p>
+                <p><a href="{scene_link}">Start Reading (Test Link)</a></p>
+            </div>
+            """
+    else:
+        story_list_html = "<p>No stories found in the library. Please add content to the database.</p>"
+
+    html_content = f"""
+    <body style="font-family: sans-serif; padding: 40px; background-color: #F8F6F0;">
+        <h1>Welcome, {session.get('username', 'Reader')}!</h1>
+        <p><a href="{url_for('logout')}">Logout</a></p>
+        <hr>
+        <h2>Your Private Library</h2>
+        {story_list_html}
+    </body>
+    """
+    return render_template_string(html_content)
 # --- END OF APP.PY ---
