@@ -6,6 +6,7 @@ from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
 from pcloud import PyCloud
 from io import BytesIO
+import posixpath
 
 # --- 1. INITIALIZE APP AND CLIENTS ---
 app = Flask(__name__)
@@ -37,6 +38,75 @@ def setup_pcloud():
     global pcloud_client
     if pcloud_client is None and PCLOUD_EMAIL and PCLOUD_PASSWORD:
         pcloud_client = initialize_pcloud_client()
+
+# =======================================================
+# == MODULAR FUNCTION 6: FILE REGISTRATION HELPER =======
+# =======================================================
+
+def get_or_register_file_id(scene_id, file_name, book_slug, series_slug, media_type):
+    """
+    Checks the local 'files' registry for the pCloud file ID. 
+    If not found, it attempts to look up the ID via the pCloud API and inserts it.
+    Returns the pcloud_file_id (str) or None on failure.
+    """
+    
+    DB_URL = os.environ.get('DATABASE_URL')
+    
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # --- A. CHECK LOCAL REGISTRY (writing.files) ---
+        cur.execute("SELECT pcloud_file_id FROM writing.files WHERE file_name = %s;", (file_name,))
+        file_record = cur.fetchone()
+
+        if file_record and file_record.get('pcloud_file_id'):
+            cur.close(); conn.close()
+            return file_record['pcloud_file_id'] # ID is found locally, proceed quickly
+
+        # --- B. REGISTER NEW FILE (If file_id is missing locally) ---
+        
+        # 1. Construct the unique path required for the pCloud API lookup
+        media_folder = 'images' if media_type == 'image' else 'audio'
+        pcloud_path = (
+            f"/my_private_stories/media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{file_name}"
+        )
+        
+        print(f"DEBUG: Attempting pCloud API lookup for: {pcloud_path}")
+        
+        # 2. Look up the ID via pCloud (The slow, fragile step)
+        file_metadata = pcloud_client.listfolder(path=posixpath.dirname(pcloud_path))
+        
+        # Filter the contents to find the specific file and its ID
+        file_id = None
+        for item in file_metadata.get('contents', []):
+            if item.get('name') == file_name:
+                file_id = item.get('fileid')
+                break
+        
+        if not file_id:
+            print("ERROR: pCloud API lookup failed. File not found at unique path.")
+            cur.close(); conn.close()
+            return None # Cannot proceed
+
+        # 3. INSERT the new file ID into the writing.files registry
+        cur.execute("""
+            INSERT INTO writing.files (pcloud_file_id, file_name, file_type)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (file_name) DO UPDATE SET pcloud_file_id = EXCLUDED.pcloud_file_id
+            RETURNING file_id;
+        """, (str(file_id), file_name, media_type))
+        
+        conn.commit()
+        print(f"? Auto-Registered File: {file_name} with pCloud ID {file_id}.")
+        
+        cur.close(); conn.close()
+        return str(file_id) # Return the found pCloud ID
+
+    except Exception as e:
+        if 'conn' in locals() and conn: conn.rollback()
+        print(f"CRITICAL FILE REGISTRATION CRASH: {e}")
+        return None
 
 # --- 2. THE LOGIN / LOGOUT ROUTES (Security Gate) ---
 
@@ -166,21 +236,22 @@ import os
 # ... other imports ...
 # REMOVE 'import requests' from your imports, it is no longer needed
 
-# --- 4. THE SECURE MEDIA PROXY ROUTE (Path-Based Solution) ---
+# --- 4. THE SECURE MEDIA PROXY ROUTE (Final Working Solution) ---
 @app.route('/media/<int:scene_id>/<path:filename>')
 def secure_media_proxy(scene_id, filename):
-    # SECURITY GATE
+    # --- SECURITY GATE ---
     if 'user_id' not in session: return abort(401)
     if pcloud_client is None: return abort(503)
 
     DB_URL = os.environ.get('DATABASE_URL')
-    
-    # 1. QUERY DATABASE to get the slugs and media type
+    pcloud_file_id = None 
+
+    # 1. QUERY DATABASE to get the file path components needed for registration
     try:
         conn = psycopg2.connect(DB_URL, sslmode='require')
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Unified query to get path components and media type
+        # This unified query fetches all slugs and media type needed for registration
         sql_query = """
         SELECT st.book_slug, se.series_slug, ms.media_type
         FROM writing.media_sync ms
@@ -188,14 +259,16 @@ def secure_media_proxy(scene_id, filename):
         JOIN writing.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN writing.stories st ON ch.story_id = st.story_id
         JOIN writing.series se ON st.series_id = se.series_id
-        WHERE ms.scene_id = %s AND ms.media_file_path = %s;
+        WHERE ms.scene_id = %s AND ms.file_name = %s;
         """
+        # Note: We query the media_sync table using the new file_name column
         cur.execute(sql_query, (scene_id, filename))
         db_result = cur.fetchone()
         
         cur.close(); conn.close()
 
         if not db_result:
+            print(f"Proxy Error: Mapping not found in DB for scene {scene_id} and file {filename}.")
             return abort(404)
         
         book_slug = db_result['book_slug']
@@ -206,30 +279,35 @@ def secure_media_proxy(scene_id, filename):
         print(f"DATABASE QUERY CRASH in Proxy: {e}")
         return abort(500)
 
-    # 2. CONSTRUCT THE FINAL PCLOUD PATH
-    media_folder = 'images' if media_type == 'image' else 'audio'
-    pcloud_path = (
-        f"/my_private_stories/media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{filename}"
+    # 2. CRITICAL: GET THE FILE ID (Auto-Registering if necessary)
+    # This calls the helper function to ensure we have the numerical pcloud_file_id
+    pcloud_file_id = get_or_register_file_id(
+        scene_id, filename, book_slug, series_slug, media_type
     )
     
-    # 3. CRITICAL: DIRECTLY FETCH THE FILE CONTENT using the PATH
+    if pcloud_file_id is None:
+        # If the file isn't found locally or on pCloud after lookup
+        return abort(404) 
+
+    # 3. DIRECTLY FETCH THE FILE CONTENT using the correct method and ID
     try:
-        # Use the correct path-based file download method, which the pcloud client should expose
-        # We rely on the full path string constructed from the database slugs.
-        file_stream = pcloud_client.file_download(path=pcloud_path)
+        # Use the correct, required function signature: client.file.download(fileid=...)
+        # We must convert the VARCHAR ID from the database back to an integer
+        file_stream = pcloud_client.file.download(fileid=int(pcloud_file_id))
         file_data = file_stream.read()
         
         # 4. STREAM RESPONSE
         content_type = 'image/jpeg' if media_type == 'image' else 'audio/mpeg'
         
         response = Response(file_data, mimetype=content_type)
+        # Ensure 'inline' is used so the browser displays it, not downloads it
         response.headers['Content-Disposition'] = f'inline; filename="{filename}"'
         return response
 
     except Exception as e:
+        # This catches errors like 'File not found' from pCloud API
         print(f"pCloud Access Failure: {e}")
         return abort(404)
-
 # =======================================================
 # == MODULAR FUNCTION 1: DATABASE RETRIEVAL =============
 # =======================================================
