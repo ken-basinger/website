@@ -189,25 +189,42 @@ def read_scene(scene_id):
     
     # 1. FETCH DATA AND TRIGGERS FROM DB VIEW
     try:
-        conn = psycopg2.connect(DB_URL, sslmode='require')
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        sql_sync_query = "SELECT * FROM writing.scene_media_details WHERE scene_id = %s;"
-        cur.execute(sql_sync_query, (scene_id,))
-        results = cur.fetchall()
-        cur.close()
-        conn.close()
+    conn = psycopg2.connect(DB_URL, sslmode='require')
+    cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        if not results:
-            return render_template_string("<h1>404</h1><p>Scene not found or no media triggers defined.</p>", 404)
-        
-        scene_data = {
-            'title': results[0]['scene_title'],
-            'raw_text': results[0]['scene_text'],
-            'story_title': results[0]['story_title'],
-            'series_slug': results[0]['series_slug'],
-        }
-        
+    # --- QUERY 1: Get Scene Details (Text, Order) ---
+    cur.execute("SELECT chapter_id, scene_title, scene_text, scene_order FROM writing.scenes WHERE scene_id = %s;", (scene_id,))
+    scene = cur.fetchone()
+    if not scene: return abort(404)
+    
+    # --- QUERY 2: Get Story and Series Slugs (For Path Construction) ---
+    cur.execute("SELECT story_id FROM writing.chapters WHERE chapter_id = %s;", (scene['chapter_id'],))
+    chapter_info = cur.fetchone()
+    if not chapter_info: return abort(404)
+
+    cur.execute("SELECT book_slug, series_id FROM writing.stories WHERE story_id = %s;", (chapter_info['story_id'],))
+    story_info = cur.fetchone()
+    if not story_info: return abort(404)
+    
+    cur.execute("SELECT series_slug FROM writing.series WHERE series_id = %s;", (story_info['series_id'],))
+    series_info = cur.fetchone()
+    if not series_info: return abort(404)
+
+    # --- QUERY 3: Get ALL Media Triggers for the Scene ---
+    sql_triggers = "SELECT text_trigger_id, media_type, media_file_path FROM writing.media_sync WHERE scene_id = %s;"
+    cur.execute(sql_triggers, (scene_id,))
+    raw_triggers = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    # --- ASSEMBLE final scene_data dictionary ---
+    scene_data = {
+        'title': scene['scene_title'],
+        'raw_text': scene['scene_text'],
+        'story_title': story_info['book_slug'], # Using the slug as the simple title for now
+        'series_slug': series_info['series_slug'],
+    }        
         # Separate the multimedia triggers for the frontend
         for row in results:
             if row['media_type'] == 'image' and row['full_pcloud_media_path']:
