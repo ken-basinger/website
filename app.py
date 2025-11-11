@@ -364,9 +364,25 @@ def read_scene(scene_id):
     if 'user_id' not in session:
         return redirect(url_for('login_page'))
     
-    # 1. FETCH DATA (Call the modular DB function)
-    data = get_scene_db_data(scene_id)
+# 1. Check for missing data (The crash point)
+    if not results:
+        return abort(404) 
+
+    # 2. Get the first row which contains all the story/series info
+    first_row = results[0] 
     
+    # --- TEMPORARY CRASH TRIGGER ---
+    # We will try to access the keys Python needs. If one is wrong, the tracebacks tells us which one.
+    
+    # The template relies on these four keys. One of them is causing the crash.
+    test_story_title = first_row['story_title'] 
+    test_series_slug = first_row['series_slug'] 
+    test_scene_title = first_row['scene_title'] 
+    test_scene_text = first_row['scene_text'] 
+    
+    print(f"DEBUG: Story Title is {test_story_title}")
+    
+    # --- END TEMPORARY CRASH TRIGGER ---    
     # 2. HANDLE ERRORS
     if data is None:
         # Returns 404 if data not found or database crashed
