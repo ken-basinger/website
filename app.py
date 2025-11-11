@@ -175,7 +175,6 @@ def secure_media_proxy(scene_id, filename):
     return abort(404)
     
 
-# --- 5. THE IMMERSIVE READER ROUTE ---
 @app.route('/read/<int:scene_id>')
 def read_scene(scene_id):
     # --- SECURITY GATE ---
@@ -184,57 +183,79 @@ def read_scene(scene_id):
     # --- END SECURITY GATE ---
 
     DB_URL = os.environ.get('DATABASE_URL')
-    scene_data = None
-    media_triggers = []
     
-    # 1. FETCH DATA AND TRIGGERS FROM DB VIEW
+    # --- FIX 1: Initialize all core variables outside the try block ---
+    scene = None
+    story_info = {'book_slug': 'Unknown Story', 'series_id': None}
+    series_info = {'series_slug': 'Unknown Series'}
+    raw_triggers = []
+    
+    # The final data dictionary
+    scene_data = {
+        'title': "Error Loading Scene",
+        'raw_text': "Error: Could not retrieve text from database.",
+        'story_title': "N/A",
+        'series_slug': "N/A",
+    }
+    
     try:
         conn = psycopg2.connect(DB_URL, sslmode='require')
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # --- QUERY 1: Get Scene Details (Text, Order) ---
+        # 1. Get Scene Text and Chapter Link
         cur.execute("SELECT chapter_id, scene_title, scene_text, scene_order FROM writing.scenes WHERE scene_id = %s;", (scene_id,))
         scene = cur.fetchone()
         if not scene: return abort(404)
-    
-        # --- QUERY 2: Get Story and Series Slugs (For Path Construction) ---
+        
+        # 2. Get Story and Series Slugs (JOIN LOGIC)
         cur.execute("SELECT story_id FROM writing.chapters WHERE chapter_id = %s;", (scene['chapter_id'],))
         chapter_info = cur.fetchone()
         if not chapter_info: return abort(404)
 
-        cur.execute("SELECT book_slug, series_id FROM writing.stories WHERE story_id = %s;", (chapter_info['story_id'],))
+        cur.execute("SELECT story_title, book_slug, series_id FROM writing.stories WHERE story_id = %s;", (chapter_info['story_id'],))
         story_info = cur.fetchone()
         if not story_info: return abort(404)
-    
+        
         cur.execute("SELECT series_slug FROM writing.series WHERE series_id = %s;", (story_info['series_id'],))
         series_info = cur.fetchone()
         if not series_info: return abort(404)
 
-        # --- QUERY 3: Get ALL Media Triggers for the Scene ---
+        # 3. Get ALL Media Triggers for the Scene
         sql_triggers = "SELECT text_trigger_id, media_type, media_file_path FROM writing.media_sync WHERE scene_id = %s;"
         cur.execute(sql_triggers, (scene_id,))
-        raw_triggers = cur.fetchall()
-
+        raw_triggers = cur.fetchall() # <-- Variable used below in the loop
+        
         cur.close()
         conn.close()
 
-        # --- ASSEMBLE final scene_data dictionary ---
+        # --- ASSEMBLE FINAL DATA DICTIONARY (Only happens on success) ---
         scene_data = {
             'title': scene['scene_title'],
             'raw_text': scene['scene_text'],
-            'story_title': story_info['book_slug'], # Using the slug as the simple title for now
+            # Use the actual title from the database if available
+            'story_title': story_info['story_title'], 
             'series_slug': series_info['series_slug'],
-        }        
-        # Separate the multimedia triggers for the frontend
-        for row in results:
-            if row['media_type'] == 'image' and row['full_pcloud_media_path']:
-                # The media_path uses the secure proxy route
-                filename = os.path.basename(row['full_pcloud_media_path'])
-                media_triggers.append({
-                    'trigger_id': row['text_trigger_id'],
-                    'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
-                })
-        
+            'scene_order': scene['scene_order'],
+            'chapter_order': scene['chapter_order'],
+        }
+    
+    except Exception as e:
+        print(f"DATABASE ERROR during scene retrieval: {e}")
+        # If the DB fails, scene_data remains the default error message
+        return abort(500) # Revert to 500 error if the entire block failed
+    
+    # --- FIX 2: PROCESS TRIGGERS (This block is now safe to run) ---
+    media_triggers = []
+    
+    # Separate the multimedia triggers for the frontend
+    for row in raw_triggers: # This uses the 'raw_triggers' variable defined in the try block
+        # ... (Your existing logic for checking media_type and appending to media_triggers remains here) ...
+        if row['media_type'] == 'image' and row.get('media_file_path'): # Ensure path exists
+             filename = os.path.basename(row['media_file_path'])
+             media_triggers.append({
+                 'trigger_id': row['text_trigger_id'],
+                 'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
+             })
     except Exception as e:
         print(f"DATABASE ERROR during scene retrieval: {e}")
         return abort(500)
