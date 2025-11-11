@@ -233,16 +233,22 @@ def generate_scene_html(scene_id, data):
     
     # Process triggers into a cleaner list for the frontend
     media_triggers = []
+
+    # Only process image triggers for now
     for row in data['raw_triggers']:
-        # Only process image triggers for now
-        if row['media_type'] == 'image' and row.get('media_file_path'):
-            filename = os.path.basename(row['media_file_path'])
+        if row['media_type'] == 'image' and row.get('media_file_path'): 
+            # We must use the full file path from the view for the proxy lookup!
+            full_path = row['full_pcloud_media_path'] 
+            
+            # The proxy route needs the Scene ID AND the final filename
+            filename = full_path.split('/')[-1] 
+
             media_triggers.append({
                 'trigger_id': row['text_trigger_id'],
-                # The media_path uses the secure proxy route
+                # We send the final filename for the proxy to use as the route slug
                 'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
             })
-
+            
     paragraphs = data['scene']['scene_text'].split('\n\n')
     processed_text_html = ""
     
@@ -275,7 +281,44 @@ def generate_scene_html(scene_id, data):
     <head>
         <title>{data['scene']['scene_title']} | {data['story']['story_title']}</title>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:wght@400;700&family=Cormorant+Garamond:wght@300;700&display=swap">
-        <style> /* ... (Your elegant CSS remains here) ... */ </style>
+        <style>
+            /* BASE AESTHETICS */
+            body { background-color: #F8F6F0; color: #262626; font-family: 'Tinos', serif; margin: 0; padding: 0; }
+            
+            /* --- LAYOUT FIX: THE GRID --- */
+            .reading-area { 
+                display: grid;
+                grid-template-columns: minmax(600px, 800px) 1fr; /* Text is wide, image is fixed sidebar */
+                max-width: 1400px; 
+                margin: 0 auto; 
+            }
+            
+            /* TYPOGRAPHY FIXES */
+            .text-column { 
+                padding: 3rem 4rem; 
+                font-size: 1.25rem; /* Now readable size */
+                line-height: 1.8; /* Good spacing */ 
+            }
+            .chapter-title { 
+                font-family: 'Cormorant Garamond', serif; 
+                font-size: 4rem; 
+                color: #8B7D6C; 
+            }
+
+            /* STICKY IMAGE FIX */
+            .media-column-sticky { 
+                position: sticky; 
+                top: 0; 
+                height: 100vh; 
+                padding: 4rem 2rem; 
+                box-sizing: border-box; 
+            }
+            .scene-image { 
+                width: 100%; 
+                border-radius: 4px; 
+                box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); 
+            }
+        </style>
     </head>
     <body>
         <div class="reading-area">
