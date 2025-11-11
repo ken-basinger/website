@@ -118,9 +118,9 @@ def story_library():
         # SQL to fetch ALL stories and their slugs for linking
         sql_query = """
         SELECT 
-            s.story_id, s.story_title, s.book_slug, se.series_slug
-        FROM writing.stories s
-        JOIN writing.series se ON s.series_id = se.series_id;
+            st.story_id, st.story_title, st.book_slug, se.series_slug
+        FROM writing.stories st
+        JOIN writing.series se ON st.series_id = se.series_id;
         """
         cur.execute(sql_query)
         stories = cur.fetchall()
