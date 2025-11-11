@@ -1,5 +1,5 @@
 Flask
 psycopg2-binary
-pcloud-sdk-python==1.0.0
+pcloud-sdk-python
 gunicorn
 Werkzeug

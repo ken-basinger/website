@@ -1,22 +1,24 @@
 import os
 import secrets
+import posixpath 
 from flask import Flask, render_template_string, redirect, url_for, request, session, Response, abort
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
-from pcloud import PyCloud # Assuming this is the correct SDK name
-import posixpath # For safe path handling
+# --- FINAL FIX: Use the correct, stable SDK name and class ---
+from pcloud_sdk import PCloudSDK  
+# -------------------------------------------------------------
+from io import BytesIO
 
 # --- 1. INITIALIZE APP AND CLIENTS ---
 app = Flask(__name__)
 
-# SECURITY CRITICAL: Load secrets from environment variables
+# Load environment variables
 DB_URL = os.environ.get('DATABASE_URL')
 PCLOUD_EMAIL = os.environ.get('PCLOUD_EMAIL')
 PCLOUD_PASSWORD = os.environ.get('PCLOUD_PASSWORD')
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(16))
 
-# Global client initialization (Default to None, initialized later)
 pcloud_client = None
 
 def initialize_pcloud_client():
@@ -25,8 +27,8 @@ def initialize_pcloud_client():
         print("CRITICAL ERROR: PCLOUD_EMAIL or PCLOUD_PASSWORD is not set.")
         return None
     try:
-        # Use direct authentication (email/password)
-        client = PyCloud(PCLOUD_EMAIL, PCLOUD_PASSWORD)
+        # Use the correct client class name
+        client = PCloudSDK(email=PCLOUD_EMAIL, password=PCLOUD_PASSWORD)
         print("SUCCESS: pCloud client initialized.")
         return client
     except Exception as e:
@@ -35,9 +37,7 @@ def initialize_pcloud_client():
 
 @app.before_request
 def setup_pcloud():
-    """Initializes pCloud client before the first request is served."""
     global pcloud_client
-    # Only initialize if it failed or is None AND credentials exist
     if pcloud_client is None:
         pcloud_client = initialize_pcloud_client()
 
@@ -70,29 +70,33 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
             if cur.fetchone():
                  cur.close(); conn.close()
                  return file_record['pcloud_file_id']
-            # If media_sync link is missing, we create it below (after API lookup)
+            # If media_sync link is missing, we proceed to registration/linking below
 
         # --- B. REGISTER NEW FILE (If ID is missing locally) ---
         
+        # 1. Construct the unique full path required for the pCloud API lookup
         media_folder = 'images' if media_type == 'image' else 'audio'
-        # FINAL PATH CONSTRUCTION: Use the most minimal structure (Root of your media folder)
         pcloud_path = f"/media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{file_name}"
         
-        # 1. Look up the ID via pCloud API
-        print(f"DEBUG: Attempting pCloud API lookup for: {pcloud_path}")
+        # 2. Look up the file ID via pCloud API (Slow Step)
+        print(f"DEBUG: Auto-registration lookup for: {pcloud_path}")
         folder_path = posixpath.dirname(pcloud_path)
-        folder_contents = pcloud_client.listfolder(path=folder_path)['contents']
+        
+        # NOTE: Using the direct client method to list contents
+        folder_contents = pcloud_client.listfolder(path=folder_path)['contents'] 
         
         file_metadata = next((item for item in folder_contents if item.get('name') == file_name), None)
         
         if not file_metadata or not file_metadata.get('fileid'):
-            print(f"ERROR: File '{file_name}' not found on pCloud.")
+            print(f"ERROR: File '{file_name}' not found on pCloud at path: {folder_path}")
             cur.close(); conn.close()
             return None 
 
         pcloud_file_id = file_metadata['fileid']
         
-        # 2. Insert/Update the file and LINK the media_sync record
+        # 3. Insert the new file and LINK the media_sync record
+        
+        # Insert file into registry
         cur.execute("""
             INSERT INTO writing.files (pcloud_file_id, file_name, file_type)
             VALUES (%s, %s, %s) ON CONFLICT (file_name) DO UPDATE SET pcloud_file_id = EXCLUDED.pcloud_file_id
@@ -100,7 +104,7 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
         """, (str(pcloud_file_id), file_name, media_type))
         local_file_id = cur.fetchone()['file_id']
         
-        # 3. Link the scene to the new file (handles cases where link was missing)
+        # Link the scene to the new file (handles cases where link was missing)
         cur.execute("""
             INSERT INTO writing.media_sync (scene_id, text_trigger_id, media_type, file_id)
             VALUES (%s, %s, %s, %s) 
@@ -111,14 +115,14 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
         print(f"? AUTO-REGISTERED: {file_name} with pCloud ID {pcloud_file_id}.")
         
         cur.close(); conn.close()
-        return str(pcloud_file_id) # Return the found pCloud ID
+        return str(pcloud_file_id) 
 
     except Exception as e:
         if 'conn' in locals() and conn: conn.rollback()
         print(f"CRITICAL FILE REGISTRATION CRASH: {e}")
         return None
 
-# --- 2. THE LOGIN / LOGOUT ROUTES (The Security Gate) ---
+# --- 2. THE LOGIN / LOGOUT ROUTES (Security Gate) ---
 
 @app.route('/login', methods=['GET'])
 def login_page():
@@ -248,7 +252,7 @@ def story_library():
     return render_template_string(html_content)
 
 
-# --- 4. THE SECURE MEDIA PROXY ROUTE (Final Working Solution) ---
+# --- 4. THE SECURE MEDIA PROXY ROUTE ---
 @app.route('/media/<int:scene_id>/<path:filename>')
 def secure_media_proxy(scene_id, filename):
     # SECURITY GATE
@@ -262,7 +266,7 @@ def secure_media_proxy(scene_id, filename):
         conn = psycopg2.connect(DB_URL, sslmode='require')
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # This query is simplified to fetch only path-defining data
+        # Query simplified to fetch only path-defining data
         sql_query = """
         SELECT st.book_slug, se.series_slug, ms.media_type
         FROM writing.media_sync ms
@@ -298,7 +302,7 @@ def secure_media_proxy(scene_id, filename):
 
     # 3. DIRECTLY FETCH THE FILE CONTENT using the correct method and ID
     try:
-        # We assume the correct syntax is now 'file.download' with fileid (requires successful auto-registration)
+        # Use the correct, required function signature: client.file.download(fileid=...)
         file_stream = pcloud_client.file.download(fileid=int(pcloud_file_id)) 
         file_data = file_stream.read()
         
@@ -411,19 +415,16 @@ def read_scene(scene_id):
             /* --- High-End Editorial Theme CSS (VISUAL FIXES) --- */
             body {{ background-color: #F8F6F0; color: #262626; font-family: 'Tinos', serif; margin: 0; padding: 0;}}
             
-            /* FIX 1: Layout and Structure */
             .reading-area {{ 
                 display: grid;
                 grid-template-columns: minmax(600px, 800px) 1fr;
                 max-width: 1400px; 
                 margin: 0 auto; 
             }}
-            
-            /* FIX 2: Typography (Small Text Fix) */
             .text-column {{ 
                 padding: 3rem 4rem; 
-                font-size: 1.25rem; /* Increased size for readability */
-                line-height: 1.8; /* Generous spacing */ 
+                font-size: 1.25rem; 
+                line-height: 1.8; 
             }}
             .chapter-title {{ 
                 font-family: 'Cormorant Garamond', serif; 
@@ -433,7 +434,6 @@ def read_scene(scene_id):
                 margin-bottom: 3rem; 
             }}
 
-            /* FIX 3: Sticky Image */
             .media-column-sticky {{ 
                 position: sticky; 
                 top: 0; 
@@ -496,7 +496,3 @@ def read_scene(scene_id):
     </html>
     """
     return render_template_string(html_template)
-
-
-if __name__ == '__main__':
-    app.run(debug=True)
