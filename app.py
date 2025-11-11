@@ -176,6 +176,8 @@ def story_library():
         <h2>Your Private Library</h2>
         {story_list_html}
     </body>
+    """)
+    return render_template_string(html_content)
 
 
 # --- 4. THE SECURE MEDIA PROXY ROUTE (Protected) ---
