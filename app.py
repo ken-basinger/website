@@ -217,7 +217,7 @@ def secure_media_proxy(scene_id, filename):
     try:
         # Use the original, basic 'getfile' command. This performs a direct binary transfer
         # from pCloud to your Render server, bypassing the referrer security check.
-        file_data = pcloud_client.getfile(path=pcloud_path).read()
+        file_data = pcloud_client.download(path=pcloud_path).read()
         
         # 4. STREAM RESPONSE
         content_type = 'image/jpeg' if media_type == 'image' else 'audio/mpeg'
