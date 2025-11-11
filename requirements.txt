@@ -1,5 +1,5 @@
-Flask               # To build the simple website
-psycopg2-binary     # To talk to your PostgreSQL database
-pcloud              # To talk to your private pCloud storage
-gunicorn            # To run the website on the Render server
+Flask
+psycopg2-binary
+pcloud
+gunicorn
 Werkzeug
