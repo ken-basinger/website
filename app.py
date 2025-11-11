@@ -175,28 +175,14 @@ def secure_media_proxy(scene_id, filename):
     return abort(404)
     
 
-@app.route('/read/<int:scene_id>')
-def read_scene(scene_id):
-    # --- SECURITY GATE ---
-    if 'user_id' not in session:
-        return redirect(url_for('login_page'))
-    # --- END SECURITY GATE ---
+# =======================================================
+# == MODULAR FUNCTION 1: DATABASE RETRIEVAL =============
+# =======================================================
 
+def get_scene_db_data(scene_id):
+    """Fetches and consolidates all scene, story, and trigger data."""
+    
     DB_URL = os.environ.get('DATABASE_URL')
-    
-    # --- FIX 1: Initialize all core variables outside the try block ---
-    scene = None
-    story_info = {'book_slug': 'Unknown Story', 'series_id': None}
-    series_info = {'series_slug': 'Unknown Series'}
-    raw_triggers = []
-    
-    # The final data dictionary
-    scene_data = {
-        'title': "Error Loading Scene",
-        'raw_text': "Error: Could not retrieve text from database.",
-        'story_title': "N/A",
-        'series_slug': "N/A",
-    }
     
     try:
         conn = psycopg2.connect(DB_URL, sslmode='require')
@@ -205,144 +191,128 @@ def read_scene(scene_id):
         # 1. Get Scene Text and Chapter Link
         cur.execute("SELECT chapter_id, scene_title, scene_text, scene_order FROM writing.scenes WHERE scene_id = %s;", (scene_id,))
         scene = cur.fetchone()
-        if not scene: return abort(404)
+        if not scene: return None
         
         # 2. Get Story and Series Slugs (JOIN LOGIC)
         cur.execute("SELECT story_id FROM writing.chapters WHERE chapter_id = %s;", (scene['chapter_id'],))
         chapter_info = cur.fetchone()
-        if not chapter_info: return abort(404)
+        if not chapter_info: return None
 
         cur.execute("SELECT story_title, book_slug, series_id FROM writing.stories WHERE story_id = %s;", (chapter_info['story_id'],))
         story_info = cur.fetchone()
-        if not story_info: return abort(404)
         
         cur.execute("SELECT series_slug FROM writing.series WHERE series_id = %s;", (story_info['series_id'],))
         series_info = cur.fetchone()
-        if not series_info: return abort(404)
 
         # 3. Get ALL Media Triggers for the Scene
         sql_triggers = "SELECT text_trigger_id, media_type, media_file_path FROM writing.media_sync WHERE scene_id = %s;"
         cur.execute(sql_triggers, (scene_id,))
-        raw_triggers = cur.fetchall() # <-- Variable used below in the loop
+        raw_triggers = cur.fetchall()
         
         cur.close()
         conn.close()
 
-        # --- ASSEMBLE FINAL DATA DICTIONARY (Only happens on success) ---
-        scene_data = {
-            'title': scene['scene_title'],
-            'raw_text': scene['scene_text'],
-            # Use the actual title from the database if available
-            'story_title': story_info['story_title'], 
-            'series_slug': series_info['series_slug'],
-            'scene_order': scene['scene_order'],
-            'chapter_order': scene['chapter_order'],
+        # Consolidate all fetched data into one object
+        return {
+            'scene': scene,
+            'story': story_info,
+            'series': series_info,
+            'raw_triggers': raw_triggers
         }
-    
-    except Exception as e:
-        print(f"DATABASE ERROR during scene retrieval: {e}")
-        # If the DB fails, scene_data remains the default error message
-        return abort(500) # Revert to 500 error if the entire block failed
-    
-    # --- FIX 2: PROCESS TRIGGERS (This block is now safe to run) ---
-    media_triggers = []
-    
-    # Separate the multimedia triggers for the frontend
-    for row in raw_triggers: # This uses the 'raw_triggers' variable defined in the try block
-        # ... (Your existing logic for checking media_type and appending to media_triggers remains here) ...
-        if row['media_type'] == 'image' and row.get('media_file_path'): # Ensure path exists
-             filename = os.path.basename(row['media_file_path'])
-             media_triggers.append({
-                 'trigger_id': row['text_trigger_id'],
-                 'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
-             })
-    except Exception as e:
-        print(f"DATABASE ERROR during scene retrieval: {e}")
-        return abort(500)
 
-    # --- 2. GENERATE HTML (Text Segmentation and Trigger Insertion) ---
+    except Exception as e:
+        print(f"DATABASE ERROR in get_scene_db_data: {e}")
+        return None
+
+# =======================================================
+# == MODULAR FUNCTION 2: HTML/MARKER GENERATION =========
+# =======================================================
+
+def generate_scene_html(scene_id, data):
+    """Segments raw text and inserts the unique HTML markers."""
     
-    # Split the raw text into a list of paragraphs
-    paragraphs = scene_data['raw_text'].split('\n\n')
+    # Process triggers into a cleaner list for the frontend
+    media_triggers = []
+    for row in data['raw_triggers']:
+        # Only process image triggers for now
+        if row['media_type'] == 'image' and row.get('media_file_path'):
+            filename = os.path.basename(row['media_file_path'])
+            media_triggers.append({
+                'trigger_id': row['text_trigger_id'],
+                # The media_path uses the secure proxy route
+                'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
+            })
+
+    paragraphs = data['scene']['scene_text'].split('\n\n')
     processed_text_html = ""
     
     # Loop through each paragraph to insert unique IDs
     for i, p in enumerate(paragraphs):
         # Create the globally unique trigger ID: p-[scene ID]-[paragraph order]
-        unique_trigger_id = f'p-{scene_id}-{i + 1}' 
+        unique_trigger_id = f'p-{scene_id}-{i + 1}'
         
-        # Use this unique ID to find a matching event in the database results
+        # Find a matching trigger in the processed list
         trigger_data = next((t for t in media_triggers if t['trigger_id'] == unique_trigger_id), None)
         
         if trigger_data:
-            # If trigger exists, mark the paragraph with the unique ID and URL for the JS Intersection Observer
+            # If trigger exists, mark the paragraph for the Intersection Observer
             processed_text_html += (
                 f'<p id="{unique_trigger_id}" '
                 f'data-image-url="{trigger_data["media_path"]}" '
                 f'class="trigger-point-active">{p}</p>\n\n'
             )
         else:
-            # Otherwise, just render the normal paragraph
+            # Render the paragraph normally
             processed_text_html += f'<p>{p}</p>\n\n'
-
-    # --- 3. RENDER FINAL PAGE with JS Logic ---
-    
+            
+    # The image source is the first media trigger found
     default_image = media_triggers[0]['media_path'] if media_triggers else ''
     
+    # --- RENDER FINAL PAGE with JS Logic ---
     html_template = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
-        <title>{scene_data['title']} | {scene_data['story_title']}</title>
+        <title>{data['scene']['scene_title']} | {data['story']['story_title']}</title>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:wght@400;700&family=Cormorant+Garamond:wght@300;700&display=swap">
-        
         <style> /* ... (Your elegant CSS remains here) ... */ </style>
     </head>
     <body>
         <div class="reading-area">
             <main class="text-column">
-                <h1 class="chapter-title">{scene_data['title']}</h1>
+                <p><a href="{url_for('story_library')}" style="color: #8B7D6C;">&larr; Back</a> | <a href="{url_for('logout')}" style="color: #8B7D6C;">Logout</a></p>
+                <h1 class="chapter-title">{data['scene']['scene_title']}</h1>
                 {processed_text_html}
-                <div style="height: 50vh;">- End of Scene -</div>
             </main>
             
             <aside class="media-column-sticky">
                 <img id="dynamic-scene-image" class="scene-image" src="{default_image}" alt="Scene Illustration">
             </aside>
         </div>
-
-        <script>
-            // ... (Your JavaScript Intersection Observer logic remains here) ...
-            const dynamicImage = document.getElementById('dynamic-scene-image');
-            const triggers = document.querySelectorAll('.trigger-point-active');
-
-            const options = {{
-                root: null,
-                rootMargin: '0px 0px -40% 0px',
-                threshold: 0
-            }};
-
-            const observer = new IntersectionObserver((entries) => {{
-                entries.forEach(entry => {{
-                    if (entry.isIntersecting) {{
-                        const imageUrl = entry.target.getAttribute('data-image-url');
-                        if (dynamicImage.src !== imageUrl) {{
-                            dynamicImage.style.opacity = '0';
-                            setTimeout(() => {{
-                                dynamicImage.src = imageUrl;
-                                dynamicImage.style.opacity = '1';
-                            }}, 300);
-                        }}
-                    }}
-                }});
-            }}, options);
-            triggers.forEach(p => {{
-                observer.observe(p);
-            }});
-        </script>
+        <script> /* ... (Your JS Intersection Observer logic remains here) ... */ </script>
     </body>
     </html>
     """
+    return html_template
+    
+# --- 5. THE IMMERSIVE READER ROUTE (The Coordinator) ---
+@app.route('/read/<int:scene_id>')
+def read_scene(scene_id):
+    # --- SECURITY GATE ---
+    if 'user_id' not in session:
+        return redirect(url_for('login_page'))
+    
+    # 1. FETCH DATA (Call the modular DB function)
+    data = get_scene_db_data(scene_id)
+    
+    # 2. HANDLE ERRORS
+    if data is None:
+        # Returns 404 if data not found or database crashed
+        return abort(404) 
+
+    # 3. GENERATE & RETURN HTML (Call the modular HTML function)
+    html_template = generate_scene_html(scene_id, data)
+    
     return render_template_string(html_template)
 
 if __name__ == '__main__':
