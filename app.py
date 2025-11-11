@@ -43,7 +43,7 @@ def setup_pcloud():
 # == MODULAR FUNCTION 6: FILE REGISTRATION HELPER =======
 # =======================================================
 
-def get_or_register_file_id(scene_id, file_name, book_slug, series_slug, media_type):
+def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
     """
     Checks the local 'files' registry for the pCloud file ID. 
     If not found, it attempts to look up the ID via the pCloud API and inserts it.
