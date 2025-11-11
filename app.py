@@ -283,8 +283,8 @@ def secure_media_proxy(scene_id, filename):
 
     # 2. CRITICAL: GET THE FILE ID (Auto-Registering if necessary)
     # This calls the helper function to ensure we have the numerical pcloud_file_id
-    pcloud_file_id = get_or_register_file_id(
-        scene_id, filename, book_slug, series_slug, media_type
+    pcloud_file_id = register_or_get_id(
+    scene_id, filename, book_slug, series_slug, media_type
     )
     
     if pcloud_file_id is None:
