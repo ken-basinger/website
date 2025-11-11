@@ -3,4 +3,3 @@ psycopg2-binary
 pcloud
 gunicorn
 Werkzeug
-posixpath
