@@ -165,14 +165,94 @@ def story_library():
 # --- 4. THE SECURE MEDIA PROXY ROUTE (Protected) ---
 @app.route('/media/<int:scene_id>/<path:filename>')
 def secure_media_proxy(scene_id, filename):
-    # ... (This logic remains the same as before, waiting for final database integration) ...
-    if 'user_id' not in session: return abort(401)
-    if pcloud_client is None: return abort(503)
+    # --- SECURITY GATE ---
+    if 'user_id' not in session: 
+        return abort(401) # Unauthorized if not logged in
+    # --- END SECURITY GATE ---
 
-    # TEMPORARY TEST SUCCESS MESSAGE (Remove when fetching real files)
-    if filename == 'ch03-sc02.png':
-        return Response(f"Proxy SUCCESS: Authenticated access granted for {filename}.", mimetype='text/plain')
-    return abort(404)
+    global pcloud_client
+    DB_URL = os.environ.get('DATABASE_URL')
+    
+    if pcloud_client is None:
+        # Client not initialized, perhaps due to bad credentials on startup
+        print("ERROR: pCloud client not available for proxy.")
+        return abort(503) 
+
+    # 1. QUERY DATABASE to get the full path components
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # This query structure fetches the necessary slugs to construct the path
+        sql_query = """
+        SELECT 
+            st.book_slug, 
+            se.series_slug,
+            ms.media_type
+        FROM writing.media_sync ms
+        JOIN writing.scenes s ON ms.scene_id = s.scene_id
+        JOIN writing.chapters ch ON s.chapter_id = ch.chapter_id
+        JOIN writing.stories st ON ch.story_id = st.story_id
+        JOIN writing.series se ON st.series_id = se.series_id
+        WHERE ms.scene_id = %s AND ms.media_file_path = %s;
+        """
+        # Execute using BOTH the scene_id and the base filename
+        cur.execute(sql_query, (scene_id, filename))
+        db_result = cur.fetchone()
+        
+        cur.close()
+        conn.close()
+
+        if not db_result:
+            print(f"Proxy Error: File mapping not found in DB for scene {scene_id} and file {filename}.")
+            return abort(404)
+        
+        book_slug = db_result['book_slug']
+        series_slug = db_result['series_slug']
+        media_type = db_result['media_type']
+        
+    except Exception as e:
+        print(f"DATABASE QUERY CRASH in Proxy: {e}")
+        return abort(500) # Internal Server Error
+
+    # 2. CONSTRUCT THE FINAL PCLOUD PATH (Using forward slashes /)
+    
+    # Determine the correct media sub-folder
+    if media_type == 'image':
+        media_folder = 'images'
+    elif media_type == 'audio':
+        media_folder = 'audio'
+    else:
+        # Fallback for unsupported media types
+        return abort(404) 
+
+    # Construct the full path using the determined slugs and folders
+    # NOTE: Path starts with a single forward slash /
+    pcloud_path = (
+        f"/my_private_stories/media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{filename}"
+    )
+    
+    # 3. CRITICAL DEBUG LINE: Output the final path to the Render logs
+    print(f"DEBUG: PCLOUD FETCHING PATH: {pcloud_path}")
+
+    # 4. SECURELY FETCH THE FILE FROM PCLOUD
+    try:
+        file_data = pcloud_client.getfile(path=pcloud_path).read()
+        
+        # 5. STREAM RESPONSE (Determining Content Type)
+        if media_type == 'image':
+            content_type = 'image/jpeg' if filename.lower().endswith(('.jpg', '.jpeg')) else 'image/png'
+        else:
+            content_type = 'audio/mpeg' 
+
+        response = Response(file_data, mimetype=content_type)
+        response.headers['Content-Disposition'] = f'inline; filename="{filename}"'
+        return response
+
+    except Exception as e:
+        # This catches errors like 'File not found' from pCloud API
+        print(f"pCloud Access Failure (404 Likely): {e}")
+        return abort(404)
     
 
 # =======================================================
