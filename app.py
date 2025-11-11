@@ -69,7 +69,7 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
         # 1. Construct the unique path required for the pCloud API lookup
         media_folder = 'images' if media_type == 'image' else 'audio'
         pcloud_path = (
-            f"/my_private_stories/media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{file_name}"
+        f"/my_private_stories/media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{file_name}"
         )
         
         print(f"DEBUG: Attempting pCloud API lookup for: {pcloud_path}")
