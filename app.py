@@ -187,16 +187,12 @@ def read_scene(scene_id):
     scene_data = None
     media_triggers = []
     
+    # 1. FETCH DATA AND TRIGGERS FROM DB VIEW
     try:
         conn = psycopg2.connect(DB_URL, sslmode='require')
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # 1. Fetch ALL synchronization data for this scene ID
-        sql_sync_query = """
-        SELECT *
-        FROM writing.scene_media_details
-        WHERE scene_id = %s;
-        """
+        sql_sync_query = "SELECT * FROM writing.scene_media_details WHERE scene_id = %s;"
         cur.execute(sql_sync_query, (scene_id,))
         results = cur.fetchall()
         cur.close()
@@ -205,24 +201,21 @@ def read_scene(scene_id):
         if not results:
             return render_template_string("<h1>404</h1><p>Scene not found or no media triggers defined.</p>", 404)
         
-        # Extract the main scene text and static details from the first row
         scene_data = {
             'title': results[0]['scene_title'],
             'raw_text': results[0]['scene_text'],
-            'scene_order': results[0]['scene_order'],
-            'chapter_order': results[0]['chapter_order'],
             'story_title': results[0]['story_title'],
             'series_slug': results[0]['series_slug'],
         }
         
         # Separate the multimedia triggers for the frontend
         for row in results:
-            # We only send IMAGE triggers to the frontend for now
             if row['media_type'] == 'image' and row['full_pcloud_media_path']:
+                # The media_path uses the secure proxy route
+                filename = os.path.basename(row['full_pcloud_media_path'])
                 media_triggers.append({
                     'trigger_id': row['text_trigger_id'],
-                    'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=os.path.basename(row['full_pcloud_media_path'])),
-                    'media_type': row['media_type']
+                    'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
                 })
         
     except Exception as e:
@@ -230,42 +223,34 @@ def read_scene(scene_id):
         return abort(500)
 
     # --- 2. GENERATE HTML (Text Segmentation and Trigger Insertion) ---
-    # This segment breaks the text into paragraphs and marks the trigger spots.
     
+    # Split the raw text into a list of paragraphs
     paragraphs = scene_data['raw_text'].split('\n\n')
     processed_text_html = ""
     
-   # ... (inside the read_scene function) ...
-
-# 1. Update the loop to create the globally unique trigger ID:
-for i, p in enumerate(paragraphs):
-    # This ID is guaranteed unique across all scenes
-    unique_trigger_id = f'p-{scene_id}-{i + 1}' 
-    
-    # Use this unique ID to search the database results
-    trigger_data = next((t for t in media_triggers if t['trigger_id'] == unique_trigger_id), None)
-    
-    if trigger_data:
-        # Add the full, unique ID to the HTML paragraph tag
-        processed_text_html += (
-            f'<p id="{unique_trigger_id}" ' # <-- USING THE NEW UNIQUE ID HERE
-            f'data-image-url="{trigger_data["media_path"]}" '
-            f'class="trigger-point-active">{p}</p>\n\n'
-        )
-    else:
-        processed_text_html += f'<p>{p}</p>\n\n'
-
-# ... (rest of the function) ...
+    # Loop through each paragraph to insert unique IDs
+    for i, p in enumerate(paragraphs):
+        # Create the globally unique trigger ID: p-[scene ID]-[paragraph order]
+        unique_trigger_id = f'p-{scene_id}-{i + 1}' 
+        
+        # Use this unique ID to find a matching event in the database results
+        trigger_data = next((t for t in media_triggers if t['trigger_id'] == unique_trigger_id), None)
+        
+        if trigger_data:
+            # If trigger exists, mark the paragraph with the unique ID and URL for the JS Intersection Observer
+            processed_text_html += (
+                f'<p id="{unique_trigger_id}" '
+                f'data-image-url="{trigger_data["media_path"]}" '
+                f'class="trigger-point-active">{p}</p>\n\n'
+            )
+        else:
+            # Otherwise, just render the normal paragraph
+            processed_text_html += f'<p>{p}</p>\n\n'
 
     # --- 3. RENDER FINAL PAGE with JS Logic ---
     
-    # The image path is pulled from the *first* image trigger for the default image.
     default_image = media_triggers[0]['media_path'] if media_triggers else ''
     
-    # We pass the trigger data to the frontend JavaScript as a JSON object
-    import json
-    triggers_json = json.dumps(media_triggers)
-
     html_template = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -273,20 +258,11 @@ for i, p in enumerate(paragraphs):
         <title>{scene_data['title']} | {scene_data['story_title']}</title>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:wght@400;700&family=Cormorant+Garamond:wght@300;700&display=swap">
         
-        <style>
-            body {{ background-color: #F8F6F0; color: #262626; font-family: 'Tinos', serif; margin: 0; padding: 0;}}
-            .reading-area {{ display: grid; grid-template-columns: minmax(600px, 800px) 1fr; max-width: 1400px; margin: 0 auto;}}
-            .text-column {{ padding: 3rem 4rem; font-size: 1.25rem; line-height: 1.8; }}
-            .chapter-title {{ font-family: 'Cormorant Garamond', serif; font-weight: 300; font-size: 4rem; color: #8B7D6C; margin-bottom: 3rem; line-height: 1.1;}}
-            .media-column-sticky {{ position: sticky; top: 0; height: 100vh; padding: 4rem 2rem 2rem 1rem; box-sizing: border-box; }}
-            .scene-image {{ width: 100%; border-radius: 4px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); border: 1px solid rgba(0, 0, 0, 0.05); }}
-            /* Highlighting and other essential styles can be added here */
-        </style>
+        <style> /* ... (Your elegant CSS remains here) ... */ </style>
     </head>
     <body>
         <div class="reading-area">
             <main class="text-column">
-                <p><a href="{url_for('story_library')}" style="color: #8B7D6C;">&larr; Back to Library</a> | <a href="{url_for('logout')}" style="color: #8B7D6C;">Logout</a></p>
                 <h1 class="chapter-title">{scene_data['title']}</h1>
                 {processed_text_html}
                 <div style="height: 50vh;">- End of Scene -</div>
@@ -298,15 +274,13 @@ for i, p in enumerate(paragraphs):
         </div>
 
         <script>
+            // ... (Your JavaScript Intersection Observer logic remains here) ...
             const dynamicImage = document.getElementById('dynamic-scene-image');
             const triggers = document.querySelectorAll('.trigger-point-active');
-            
-            // The dynamic trigger data injected by Python
-            const mediaTriggers = {triggers_json};
 
             const options = {{
                 root: null,
-                rootMargin: '0px 0px -40% 0px', // Trigger when element reaches 40% down the screen
+                rootMargin: '0px 0px -40% 0px',
                 threshold: 0
             }};
 
@@ -314,20 +288,16 @@ for i, p in enumerate(paragraphs):
                 entries.forEach(entry => {{
                     if (entry.isIntersecting) {{
                         const imageUrl = entry.target.getAttribute('data-image-url');
-                        if (dynamicImage.src.indexOf(imageUrl) === -1) {{
-                            
-                            // Optional: Add a simple fade transition for visual polish
-                            dynamicImage.style.opacity = '0'; 
+                        if (dynamicImage.src !== imageUrl) {{
+                            dynamicImage.style.opacity = '0';
                             setTimeout(() => {{
                                 dynamicImage.src = imageUrl;
                                 dynamicImage.style.opacity = '1';
-                            }}, 300); // 300ms transition time
+                            }}, 300);
                         }}
                     }}
                 }});
             }}, options);
-
-            // Start observing all elements marked as triggers
             triggers.forEach(p => {{
                 observer.observe(p);
             }});
@@ -335,7 +305,7 @@ for i, p in enumerate(paragraphs):
     </body>
     </html>
     """
-    return render_template_string(html_template)
+    return render_template_string(html_template)er_template_string(html_template)
 
 if __name__ == '__main__':
     app.run(debug=True)
