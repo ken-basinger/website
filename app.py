@@ -166,7 +166,7 @@ import os
 # ... other imports ...
 # REMOVE 'import requests' from your imports, it is no longer needed
 
-# --- 4. THE SECURE MEDIA PROXY ROUTE (Final Working Solution) ---
+# --- 4. THE SECURE MEDIA PROXY ROUTE (Path-Based Solution) ---
 @app.route('/media/<int:scene_id>/<path:filename>')
 def secure_media_proxy(scene_id, filename):
     # SECURITY GATE
@@ -175,14 +175,14 @@ def secure_media_proxy(scene_id, filename):
 
     DB_URL = os.environ.get('DATABASE_URL')
     
-    # 1. QUERY DATABASE (Same as before)
+    # 1. QUERY DATABASE to get the slugs and media type
     try:
         conn = psycopg2.connect(DB_URL, sslmode='require')
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
+        # Unified query to get path components and media type
         sql_query = """
-        SELECT 
-            st.book_slug, se.series_slug, ms.media_type
+        SELECT st.book_slug, se.series_slug, ms.media_type
         FROM writing.media_sync ms
         JOIN writing.scenes s ON ms.scene_id = s.scene_id
         JOIN writing.chapters ch ON s.chapter_id = ch.chapter_id
@@ -196,7 +196,6 @@ def secure_media_proxy(scene_id, filename):
         cur.close(); conn.close()
 
         if not db_result:
-            print(f"Proxy Error: Mapping not found for scene {scene_id} and file {filename}.")
             return abort(404)
         
         book_slug = db_result['book_slug']
@@ -213,11 +212,12 @@ def secure_media_proxy(scene_id, filename):
         f"/my_private_stories/media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{filename}"
     )
     
-    # 3. CRITICAL: DIRECTLY FETCH THE FILE CONTENT (The Working Method)
+    # 3. CRITICAL: DIRECTLY FETCH THE FILE CONTENT using the PATH
     try:
-        # Use the original, basic 'getfile' command. This performs a direct binary transfer
-        # from pCloud to your Render server, bypassing the referrer security check.
-        file_data = pcloud_client.download(path=pcloud_path).read()
+        # Use the correct path-based file download method, which the pcloud client should expose
+        # We rely on the full path string constructed from the database slugs.
+        file_stream = pcloud_client.file_download(path=pcloud_path)
+        file_data = file_stream.read()
         
         # 4. STREAM RESPONSE
         content_type = 'image/jpeg' if media_type == 'image' else 'audio/mpeg'
@@ -227,10 +227,8 @@ def secure_media_proxy(scene_id, filename):
         return response
 
     except Exception as e:
-        # This catches errors like 'File not found' from pCloud API
-        print(f"pCloud Direct Fetch Failure: {e}")
+        print(f"pCloud Access Failure: {e}")
         return abort(404)
-    
 
 # =======================================================
 # == MODULAR FUNCTION 1: DATABASE RETRIEVAL =============
