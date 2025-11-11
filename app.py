@@ -357,40 +357,172 @@ def generate_scene_html(scene_id, data):
     """
     return html_template
     
-# --- 5. THE IMMERSIVE READER ROUTE (The Coordinator) ---
+# --- 5. THE IMMERSIVE READER ROUTE (The Stable Version) ---
 @app.route('/read/<int:scene_id>')
 def read_scene(scene_id):
-    # --- SECURITY GATE ---
+    # --- 1. INITIALIZATION & SECURITY GATE ---
     if 'user_id' not in session:
         return redirect(url_for('login_page'))
-    
-# 1. Check for missing data (The crash point)
-    if not results:
-        return abort(404) 
 
-    # 2. Get the first row which contains all the story/series info
-    first_row = results[0] 
+    DB_URL = os.environ.get('DATABASE_URL')
     
-    # --- TEMPORARY CRASH TRIGGER ---
-    # We will try to access the keys Python needs. If one is wrong, the tracebacks tells us which one.
+    # Initialize all complex variables outside of the try block to prevent NameError crashes
+    raw_triggers = []
     
-    # The template relies on these four keys. One of them is causing the crash.
-    test_story_title = first_row['story_title'] 
-    test_series_slug = first_row['series_slug'] 
-    test_scene_title = first_row['scene_title'] 
-    test_scene_text = first_row['scene_text'] 
-    
-    print(f"DEBUG: Story Title is {test_story_title}")
-    
-    # --- END TEMPORARY CRASH TRIGGER ---    
-    # 2. HANDLE ERRORS
-    if data is None:
-        # Returns 404 if data not found or database crashed
-        return abort(404) 
+    # Default data for rendering a clean error page if the database fails
+    scene_data = {
+        'title': "Error Loading Scene", 
+        'raw_text': "Error: Data retrieval failed. Check logs for database link errors.",
+        'story_title': "N/A", 
+        'series_slug': "N/A"
+    }
 
-    # 3. GENERATE & RETURN HTML (Call the modular HTML function)
-    html_template = generate_scene_html(scene_id, data)
+    # --- 2. DATABASE FETCHING (The Final, Robust Query) ---
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Single, unified query to fetch everything, relying on JOINs to minimize Python processing.
+        sql_final_details = """
+        SELECT
+            s.scene_title, s.scene_text, 
+            st.story_title, st.book_slug,
+            se.series_slug,
+            ms.text_trigger_id, ms.media_type, ms.media_file_path
+        FROM writing.scenes s
+        JOIN writing.chapters ch ON s.chapter_id = ch.chapter_id
+        JOIN writing.stories st ON ch.story_id = st.story_id
+        JOIN writing.series se ON st.series_id = se.series_id
+        LEFT JOIN writing.media_sync ms ON ms.scene_id = s.scene_id
+        WHERE s.scene_id = %s;
+        """
+        cur.execute(sql_final_details, (scene_id,))
+        results = cur.fetchall()
+        
+        cur.close(); conn.close()
+
+        if not results:
+            # This handles cases where the scene doesn't exist or is missing a parent link
+            return abort(404)
+
+        # --- 3. DATA ASSEMBLY (Happens only if the query succeeded) ---
+        first_row = results[0] 
+        
+        # Assemble scene_data with retrieved values
+        scene_data = {
+            'title': first_row['scene_title'],
+            'raw_text': first_row['scene_text'],
+            'story_title': first_row['story_title'],
+            'series_slug': first_row['series_slug'],
+        }
+        
+        # Filter raw triggers (rows where media_sync data exists)
+        raw_triggers = [row for row in results if row.get('text_trigger_id') is not None]
+
+    except Exception as e:
+        print(f"CRITICAL DATABASE LINKAGE/QUERY ERROR: {e}")
+        return abort(500)
     
+    # --- 4. GENERATE HTML MARKERS AND STRUCTURE ---
+    
+    paragraphs = scene_data['raw_text'].split('\n\n')
+    processed_text_html = ""
+    media_triggers = []
+
+    # Map raw_triggers for easier lookup
+    for row in raw_triggers:
+        if row['media_type'] == 'image' and row.get('media_file_path'):
+            filename = row['media_file_path'].split('/')[-1] # Extract just the filename
+            media_triggers.append({
+                'trigger_id': row['text_trigger_id'],
+                'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
+            })
+            
+    # Loop through paragraphs to insert unique IDs
+    for i, p in enumerate(paragraphs):
+        unique_trigger_id = f'p-{scene_id}-{i + 1}'
+        
+        # Check if the current sequential paragraph has a trigger event
+        trigger_data = next((t for t in media_triggers if t['trigger_id'] == unique_trigger_id), None)
+        
+        if trigger_data:
+            # Insert the ID and URL needed for the JS Intersection Observer
+            processed_text_html += (
+                f'<p id="{unique_trigger_id}" data-image-url="{trigger_data["media_path"]}" '
+                f'class="trigger-point-active">{p}</p>\n\n'
+            )
+        else:
+            processed_text_html += f'<p>{p}</p>\n\n'
+
+    # 5. RENDER FINAL PAGE (Fixes Layout and Image Link)
+    
+    # Use the first image link for the default image source, or a blank placeholder
+    default_image = media_triggers[0]['media_path'] if media_triggers else 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+    
+    html_template = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <title>{scene_data['title']} | {scene_data['story_title']}</title>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:wght@400;700&family=Cormorant+Garamond:wght@300;700&display=swap">
+        
+        <style>
+            /* --- High-End Editorial Theme CSS (Visual Fixes) --- */
+            body {{ background-color: #F8F6F0; color: #262626; font-family: 'Tinos', serif; margin: 0; padding: 0; }}
+            .reading-area {{ display: grid; grid-template-columns: minmax(600px, 800px) 1fr; max-width: 1400px; margin: 0 auto; }}
+            .text-column {{ padding: 3rem 4rem; font-size: 1.25rem; line-height: 1.8; }}
+            .chapter-title {{ font-family: 'Cormorant Garamond', serif; font-weight: 300; font-size: 4rem; color: #8B7D6C; margin-bottom: 3rem; line-height: 1.1; }}
+            .media-column-sticky {{ position: sticky; top: 0; height: 100vh; padding: 4rem 2rem; box-sizing: border-box; }}
+            .scene-image {{ width: 100%; border-radius: 4px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); border: 1px solid rgba(0, 0, 0, 0.05); transition: opacity 0.3s ease; }}
+            /* End CSS Fixes */
+        </style>
+    </head>
+    <body>
+        <div class="reading-area">
+            <main class="text-column">
+                <p><a href="{url_for('story_library')}" style="color: #8B7D6C;">&larr; Back to Library</a> | <a href="{url_for('logout')}" style="color: #8B7D6C;">Logout</a></p>
+                <h1 class="chapter-title">{scene_data['title']}</h1>
+                {processed_text_html}
+                <div style="height: 50vh;">- End of Scene -</div>
+            </main>
+            
+            <aside class="media-column-sticky">
+                <img id="dynamic-scene-image" class="scene-image" src="{default_image}" alt="Scene Illustration">
+            </aside>
+        </div>
+        
+        <script>
+            // --- JS INTERSECTION OBSERVER LOGIC ---
+            const dynamicImage = document.getElementById('dynamic-scene-image');
+            const triggers = document.querySelectorAll('.trigger-point-active');
+
+            const options = {{
+                root: null,
+                rootMargin: '0px 0px -40% 0px',
+                threshold: 0
+            }};
+
+            const observer = new IntersectionObserver((entries) => {{
+                entries.forEach(entry => {{
+                    if (entry.isIntersecting) {{
+                        const imageUrl = entry.target.getAttribute('data-image-url');
+                        if (dynamicImage.src !== imageUrl) {{
+                            dynamicImage.style.opacity = '0';
+                            setTimeout(() => {{
+                                dynamicImage.src = imageUrl;
+                                dynamicImage.style.opacity = '1';
+                            }}, 300);
+                        }}
+                    }}
+                }});
+            }}, options);
+            triggers.forEach(p => {{
+                observer.observe(p);
+            }});
+        </script>
+    </body>
+    </html>
+    """
     return render_template_string(html_template)
 
 if __name__ == '__main__':
