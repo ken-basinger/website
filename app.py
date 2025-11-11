@@ -182,47 +182,66 @@ def secure_media_proxy(scene_id, filename):
 def get_scene_db_data(scene_id):
     """Fetches and consolidates all scene, story, and trigger data."""
     
+    # --- Inside @app.route('/read/<int:scene_id>') def read_scene(scene_id): ---
+
+   # Initializations
     DB_URL = os.environ.get('DATABASE_URL')
     
+    # We define the variables the template relies on for safe rendering in case of error
+    scene_data = {'title': "Error Loading Scene", 'raw_text': "Error: Data retrieval failed.", 
+                  'story_title': "N/A", 'series_slug': "N/A"}
+    raw_triggers = []
+
     try:
         conn = psycopg2.connect(DB_URL, sslmode='require')
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
-        # 1. Get Scene Text and Chapter Link
-        cur.execute("SELECT chapter_id, scene_title, scene_text, scene_order FROM writing.scenes WHERE scene_id = %s;", (scene_id,))
-        scene = cur.fetchone()
-        if not scene: return None
-        
-        # 2. Get Story and Series Slugs (JOIN LOGIC)
-        cur.execute("SELECT story_id FROM writing.chapters WHERE chapter_id = %s;", (scene['chapter_id'],))
-        chapter_info = cur.fetchone()
-        if not chapter_info: return None
-
-        cur.execute("SELECT story_title, book_slug, series_id FROM writing.stories WHERE story_id = %s;", (chapter_info['story_id'],))
-        story_info = cur.fetchone()
-        
-        cur.execute("SELECT series_slug FROM writing.series WHERE series_id = %s;", (story_info['series_id'],))
-        series_info = cur.fetchone()
-
-        # 3. Get ALL Media Triggers for the Scene
-        sql_triggers = "SELECT text_trigger_id, media_type, media_file_path FROM writing.media_sync WHERE scene_id = %s;"
-        cur.execute(sql_triggers, (scene_id,))
-        raw_triggers = cur.fetchall()
+        # --- 1. THE UNIFIED, ROBUST QUERY ---
+        # This query performs ALL necessary JOINs (Scenes -> Chapters -> Stories -> Series)
+        # and LEFT JOINs the media triggers in one efficient operation.
+        sql_final_details = """
+        SELECT
+            s.scene_title, s.scene_text, 
+            st.story_title, st.book_slug,
+            se.series_slug,
+            ms.text_trigger_id, ms.media_type, ms.media_file_path
+        FROM writing.scenes s
+        JOIN writing.chapters ch ON s.chapter_id = ch.chapter_id
+        JOIN writing.stories st ON ch.story_id = st.story_id
+        JOIN writing.series se ON st.series_id = se.series_id
+        LEFT JOIN writing.media_sync ms ON ms.scene_id = s.scene_id
+        WHERE s.scene_id = %s;
+        """
+        cur.execute(sql_final_details, (scene_id,))
+        results = cur.fetchall()
         
         cur.close()
         conn.close()
 
-        # Consolidate all fetched data into one object
-        return {
-            'scene': scene,
-            'story': story_info,
-            'series': series_info,
-            'raw_triggers': raw_triggers
+        if not results:
+            # This handles cases where the scene doesn't exist or is missing a parent link
+            return abort(404)
+
+        # --- 2. ASSEMBLE FINAL DATA ---
+        # Data is taken from the first row of the results (as story info is identical for all rows)
+        first_row = results[0] 
+        
+        scene_data = {
+            'title': first_row['scene_title'],
+            'raw_text': first_row['scene_text'],
+            'story_title': first_row['story_title'],
+            'series_slug': first_row['series_slug'],
         }
+        
+        # Filter raw triggers (rows where media_sync data exists)
+        raw_triggers = [row for row in results if row.get('text_trigger_id') is not None]
 
     except Exception as e:
-        print(f"DATABASE ERROR in get_scene_db_data: {e}")
-        return None
+        print(f"CRITICAL DATABASE LINKAGE ERROR: {e}")
+        return abort(500)
+    
+# --- The rest of the function (HTML generation, etc.) follows here ---
+# --- (The rest of the file relies on scene_data and raw_triggers being defined.) ---
 
 # =======================================================
 # == MODULAR FUNCTION 2: HTML/MARKER GENERATION =========
