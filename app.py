@@ -253,13 +253,15 @@ def secure_media_proxy(scene_id, filename):
         
         # This unified query fetches all slugs and media type needed for registration
         sql_query = """
-        SELECT st.book_slug, se.series_slug, ms.media_type
+        SELECT st.book_slug, se.series_slug, f.file_type, f.pcloud_file_id 
         FROM writing.media_sync ms
         JOIN writing.scenes s ON ms.scene_id = s.scene_id
         JOIN writing.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN writing.stories st ON ch.story_id = st.story_id
         JOIN writing.series se ON st.series_id = se.series_id
-        WHERE ms.scene_id = %s AND ms.file_name = %s;
+        -- CRITICAL FIX: JOIN the files table to search by file_name
+        JOIN writing.files f ON ms.file_id = f.file_id
+        WHERE ms.scene_id = %s AND f.file_name = %s;
         """
         # Note: We query the media_sync table using the new file_name column
         cur.execute(sql_query, (scene_id, filename))
