@@ -220,16 +220,61 @@ def secure_media_proxy(scene_id, filename):
     # --- END SECURITY GATE ---
 
     global pcloud_client
+    DB_URL = os.environ.get('DATABASE_URL')
+    
     if pcloud_client is None:
-        return abort(503)
+        return abort(503) # Service unavailable if pCloud client failed
 
-    # ... (The rest of the final proxy logic will go here: 
-    # Querying the View to construct the pcloud_path, fetching the file, and streaming the Response) ...
+    # 1. QUERY DATABASE VIEW to get the full, constructed pCloud path
+    try:
+        conn = psycopg2.connect(DB_URL, sslmode='require')
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Query the View for the path associated with the requested scene and filename
+        sql_query = """
+        SELECT full_pcloud_media_path, media_type
+        FROM writing.scene_media_details 
+        WHERE scene_id = %s AND media_file_path = %s 
+        LIMIT 1;
+        """
+        # NOTE: Assumes media_file_path in DB is just the filename (e.g., 'ch03-sc02.png')
+        cur.execute(sql_query, (scene_id, filename)) 
+        
+        db_result = cur.fetchone()
+        cur.close()
+        conn.close()
 
-    # --- FOR NOW, LET'S JUST SHOW A SUCCESS MESSAGE ---
-    if filename == 'ch03-sc02.png':
-        return Response("Proxy SUCCESS: Authentication Passed. File data would stream here.", mimetype='text/plain')
-    else:
+        if not db_result:
+            # File not found in the database view
+            print(f"Proxy Error: File {filename} for scene {scene_id} not mapped in database.")
+            return abort(404)
+            
+        pcloud_path = db_result['full_pcloud_media_path']
+        media_type = db_result['media_type']
+        
+    except Exception as e:
+        print(f"Database Query Error in Proxy: {e}")
+        return abort(500) # Internal Server Error
+
+    # 2. SECURELY FETCH THE FILE FROM PCLOUD
+    try:
+        file_data = pcloud_client.getfile(path=pcloud_path).read()
+        
+        # 3. DETERMINE CONTENT TYPE
+        if media_type == 'image':
+            content_type = 'image/jpeg' if filename.lower().endswith(('.jpg', '.jpeg')) else 'image/png'
+        elif media_type == 'audio':
+            content_type = 'audio/mpeg' 
+        else:
+            content_type = 'application/octet-stream'
+
+        # 4. STREAM RESPONSE
+        response = Response(file_data, mimetype=content_type)
+        response.headers['Content-Disposition'] = f'inline; filename="{filename}"'
+        return response
+
+    except Exception as e:
+        print(f"pCloud Access Error: Failed to retrieve {pcloud_path}. {e}")
         return abort(404)
 
 # --- END OF APP.PY ---
