@@ -305,7 +305,7 @@ def read_scene(scene_id):
     </body>
     </html>
     """
-    return render_template_string(html_template)er_template_string(html_template)
+    return render_template_string(html_template)
 
 if __name__ == '__main__':
     app.run(debug=True)
