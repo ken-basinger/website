@@ -126,16 +126,19 @@ def login_submit():
         session['login_error'] = "Authentication service unavailable (DB error)."
         return redirect(url_for('login_page'))
 
-    if user and check_password_hash(user['password_hash'], password_input):
-        # SUCCESS
+    # === TEMPORARY OVERRIDE: CHECK FOR USER EXISTENCE ONLY ===
+    # This bypasses the password check to see if the query is the problem.
+    if user:
+        # SUCCESS: User record was found in the database.
         session['user_id'] = user['user_id']
         session['username'] = user['username']
         session.pop('login_error', None)
         return redirect(url_for('test_connection'))
     else:
-        # FAILURE
-        session['login_error'] = "Incorrect username or password."
+        # FAILURE: Database did NOT find the user record.
+        session['login_error'] = "Authentication failed (User not found)."
         return redirect(url_for('login_page'))
+    # === END OVERRIDE ===
 
 
 @app.route('/logout')
