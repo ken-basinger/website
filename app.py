@@ -75,21 +75,16 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
         print(f"DEBUG: Attempting pCloud API lookup for: {pcloud_path}")
         
         # 2. Look up the ID via pCloud (The slow, fragile step)
-        file_metadata = pcloud_client.listfolder(path=posixpath.dirname(pcloud_path))
+        file_metadata = pcloud_client.file.get_metadata(path=pcloud_path)
         
-        # Filter the contents to find the specific file and its ID
-        file_id = None
-        for item in file_metadata.get('contents', []):
-            if item.get('name') == file_name:
-                file_id = item.get('fileid')
-                break
-        
-        if not file_id:
+        if not file_metadata or file_metadata.get('isfolder') or not file_metadata.get('fileid'):
             print("ERROR: pCloud API lookup failed. File not found at unique path.")
             cur.close(); conn.close()
-            return None # Cannot proceed
+            return None 
 
-        # 3. INSERT the new file ID into the writing.files registry
+        pcloud_file_id = file_metadata['fileid']
+        
+         # 3. INSERT the new file ID into the writing.files registry
         cur.execute("""
             INSERT INTO writing.files (pcloud_file_id, file_name, file_type)
             VALUES (%s, %s, %s)
