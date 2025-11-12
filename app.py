@@ -20,14 +20,14 @@ app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(16))
 pcloud_client = None
 
 def initialize_pcloud_client():
-    """Initializes the pCloud client using the explicit US server location."""
+    """Initializes the pCloud client using the simplest login method."""
     
     if not PCLOUD_EMAIL or not PCLOUD_PASSWORD:
         print("CRITICAL ERROR: PCLOUD_EMAIL or PCLOUD_PASSWORD is not set.")
         return None
     try:
-        # STEP 1: Initialize the client object with the US server location ID (location_id=1)
-        client = PCloudSDK(location_id=1) 
+        # STEP 1: Initialize the client object with NO arguments
+        client = PCloudSDK()
         
         # STEP 2: Call the separate login method using the credentials
         client.login(email=PCLOUD_EMAIL, password=PCLOUD_PASSWORD)
@@ -63,12 +63,12 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
         # --- A. CHECK LOCAL REGISTRY (writing.files) ---
-        cur.execute("SELECT pcloud_file_id FROM writing.files WHERE file_name = %s;", (file_name,))
+        cur.execute("SELECT pcloud_file_id, file_id FROM writing.files WHERE file_name = %s;", (file_name,))
         file_record = cur.fetchone()
 
         if file_record and file_record.get('pcloud_file_id'):
             # ID found locally. Now check if media_sync link exists.
-            local_file_id = file_record['file_id'] # Assuming file_id is retrieved from file_record
+            local_file_id = file_record['file_id']
             cur.execute("SELECT 1 FROM writing.media_sync WHERE scene_id = %s AND file_id = %s;", (scene_id, local_file_id))
             
             if cur.fetchone():
@@ -117,7 +117,7 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
         print(f"? AUTO-REGISTERED: {file_name} with pCloud ID {pcloud_file_id}.")
         
         cur.close(); conn.close()
-        return str(pcloud_file_id)
+        return str(pcloud_file_id) # Return the found pCloud ID
 
     except Exception as e:
         if 'conn' in locals() and conn: conn.rollback()
@@ -499,3 +499,7 @@ def read_scene(scene_id):
     </html>
     """
     return render_template_string(html_template)
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
