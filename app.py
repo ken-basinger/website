@@ -3,6 +3,7 @@ import secrets
 import boto3
 from botocore.exceptions import ClientError
 from flask import Flask, render_template_string, redirect, url_for, request, session, abort
+import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
 
@@ -65,7 +66,6 @@ def generate_signed_s3_url(series_slug, book_slug, filename, media_type):
 
 @app.route('/login', methods=['GET'])
 def login_page():
-    # FIX: Correctly renders the login page HTML
     if session.get('user_id'): return redirect(url_for('story_library'))
     
     error_message = request.args.get('error')
@@ -138,7 +138,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# --- 4. APPLICATION CORE HANDLERS ---
+# --- 3. APPLICATION CORE HANDLERS ---
 
 @app.route('/')
 def story_library():
@@ -186,33 +186,54 @@ def story_library():
 def read_scene(scene_id):
     if 'user_id' not in session: return redirect(url_for('login_page'))
     
-    # --- 1. FETCH DATA AND PROCESS TRIGGERS ---
-    
-    # Data simulation for structural test (replace with real DB calls later)
     scene_data = {
-        'title': 'The Final Stand', 
+        'title': 'The Silence', 
         'story_title': 'Ezra: The Timekeeper\'s Loops',
         'raw_text': "The air crackled. The storm had passed, leaving behind a silence sharper than glass. Ezra took the first step, his heart hammering the rhythm he knew best.",
     }
     processed_text_html = ""
-    media_triggers = [{'trigger_id': 'p-1-3', 'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename='test-image.jpg')}]
     
-    # Simulate HTML generation with markers
-    paragraphs = scene_data['raw_text'].split('\n\n')
-    for i, p in enumerate(paragraphs):
-        unique_trigger_id = f'p-{scene_id}-{i + 1}'
-        trigger_data = media_triggers.find(t => t.trigger_id === uniqueTriggerId) if media_triggers else None
-        
-        if trigger_data:
-            processed_text_html += (
-                f'<p id="{unique_trigger_id}" data-image-url="{trigger_data["media_path"]}" class="trigger-point-active">{p}</p>\n\n'
-            )
-        else:
-            processed_text_html += f'<p>{p}</p>\n\n'
+    # 1. DATABASE FETCHING (Get real text/data)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor) # Use RealDictCursor for simpler fetching
 
-    default_image_url = media_triggers[0]['media_path'] if media_triggers else url_for('static', filename='default.jpg')
+        # Get scene details and story/series slugs
+        sql_query = """
+        SELECT
+            s.scene_title, s.scene_text, 
+            st.story_title, st.book_slug,
+            se.series_slug
+        FROM website.scenes s
+        JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
+        JOIN website.stories st ON ch.story_id = st.story_id
+        JOIN website.series se ON st.series_id = se.series_id
+        WHERE s.scene_id = %s;
+        """
+        cur.execute(sql_query, (scene_id,))
+        scene_result = cur.fetchone()
+        
+        if scene_result:
+            scene_data['title'] = scene_result['scene_title']
+            scene_data['raw_text'] = scene_result['scene_text']
+            scene_data['story_title'] = scene_result['story_title']
+            
+            # --- PROCESS TEXT SEGMENTATION (Minimalist for now) ---
+            paragraphs = scene_data['raw_text'].split('\n\n')
+            processed_text_html = "".join([f"<p>{p}</p>\n\n" for p in paragraphs])
+            
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        print(f"CRITICAL SCENE FETCH ERROR: {e}")
+        # Pass (allowing the default placeholder text to display on error)
+        pass 
     
-    # --- 2. FINAL VISUAL POLISH: IMPLEMENTED ---
+    # Final default URL for the image
+    default_image_url = url_for('secure_media_proxy', scene_id=scene_id, filename='test-image.jpg') 
+    
+    # --- 2. RENDER FINAL PAGE (WITH VISUAL POLISH) ---
     
     html_content = f"""
     <!DOCTYPE html><html><head>
@@ -237,10 +258,6 @@ def read_scene(scene_id):
                 <img id="dynamic-scene-image" class="scene-image" src="{default_image_url}" alt="Scene Illustration">
             </aside>
         </div>
-        <script>
-            // --- JS INTERSECTION OBSERVER LOGIC ---
-            // (Full JS logic for scrolling animation would be here)
-        </script>
     </body></html>
     """
     return render_template_string(html_content)
@@ -250,6 +267,5 @@ def read_scene(scene_id):
 def secure_media_proxy(scene_id, filename):
     if 'user_id' not in session: return abort(401)
     
-    # Actual S3 URL generation logic here
-    # Temporary placeholder for testing structure
+    # This is the placeholder for the S3 URL generation logic
     return redirect("https://external-placeholder.com/test-image.jpg", code=302)
