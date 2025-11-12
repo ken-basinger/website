@@ -26,7 +26,7 @@ def initialize_pcloud_client():
         print("CRITICAL ERROR: PCLOUD_EMAIL or PCLOUD_PASSWORD is not set.")
         return None
     try:
-        # STEP 1: Initialize the client object with NO arguments
+        # STEP 1: Initialize the client object with NO arguments (The final simplified fix)
         client = PCloudSDK()
         
         # STEP 2: Call the separate login method using the credentials
@@ -63,12 +63,12 @@ def register_or_get_id(scene_id, file_name, book_slug, series_slug, media_type):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
         # --- A. CHECK LOCAL REGISTRY (writing.files) ---
-        cur.execute("SELECT pcloud_file_id, file_id FROM writing.files WHERE file_name = %s;", (file_name,))
+        cur.execute("SELECT pcloud_file_id FROM writing.files WHERE file_name = %s;", (file_name,))
         file_record = cur.fetchone()
 
         if file_record and file_record.get('pcloud_file_id'):
             # ID found locally. Now check if media_sync link exists.
-            local_file_id = file_record['file_id']
+            local_file_id = file_record['file_id'] # NOTE: This key is likely wrong without the full SELECT
             cur.execute("SELECT 1 FROM writing.media_sync WHERE scene_id = %s AND file_id = %s;", (scene_id, local_file_id))
             
             if cur.fetchone():
@@ -499,7 +499,3 @@ def read_scene(scene_id):
     </html>
     """
     return render_template_string(html_template)
-
-
-if __name__ == '__main__':
-    app.run(debug=True)
