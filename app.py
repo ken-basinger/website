@@ -3,8 +3,11 @@ import secrets
 import boto3
 from botocore.exceptions import ClientError
 from flask import Flask, render_template_string, redirect, url_for, request, session, abort
+# --- CRITICAL FIX: Missing Database Imports ---
+import psycopg2 
 from psycopg2.extras import RealDictCursor
-from werkzeug.security import check_password_hash # CRUCIAL: For password comparison
+# -----------------------------------------------
+from werkzeug.security import check_password_hash 
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -38,6 +41,8 @@ def get_s3_client():
             S3_CLIENT = None
     return S3_CLIENT
 
+# --- 2. HELPER FUNCTIONS ---
+
 def get_db_connection():
     """Returns a new psycopg2 connection using the secure DB_URL."""
     return psycopg2.connect(DB_URL, sslmode='require')
@@ -61,12 +66,10 @@ def generate_signed_s3_url(series_slug, book_slug, filename, media_type):
         print(f"AWS S3 Signing Error for key {s3_key}: {e}")
         return None
 
-
-# --- 2. AUTHENTICATION ROUTES (FINAL WORKING LOGIC) ---
+# --- 3. AUTHENTICATION ROUTES ---
 
 @app.route('/login', methods=['GET'])
 def login_page():
-    # FIX: Correctly renders the login page HTML
     if session.get('user_id'): return redirect(url_for('story_library'))
     
     error_message = request.args.get('error')
@@ -99,7 +102,7 @@ def login_page():
 
 @app.route('/login', methods=['POST'])
 def login_submit():
-    # Final, robust login logic using Werkzeug hash checker
+    # Final production logic uses the actual hash check with Werkzeug
     username_or_email = request.form.get('username')
     password_input = request.form.get('password')
     user = None
@@ -120,12 +123,11 @@ def login_submit():
         conn.close()
         
     except Exception as e:
+        # If DB connection fails, return server error to prevent indefinite loop
         print(f"CRITICAL AUTHENTICATION DB ERROR: {e}")
-        # Redirect on DB failure
         return redirect(url_for('login_page', error='db_fail'))
 
     # 2. SECURE HASH CHECK
-    # This correctly compares the input password against the secure hash from the database
     if user and check_password_hash(user['password_hash'], password_input):
         # SUCCESS: Create session and redirect
         session['user_id'] = user['user_id']
