@@ -5,7 +5,7 @@ from botocore.exceptions import ClientError
 from flask import Flask, render_template_string, redirect, url_for, request, session, abort
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
-import psycopg2 # Ensure psycopg2 is imported
+import psycopg2 
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -185,12 +185,13 @@ def read_scene(scene_id):
     if 'user_id' not in session: return redirect(url_for('login_page'))
     
     scene_data = {
-        'title': 'The Silence', 
-        'story_title': 'Ezra: The Timekeeper\'s Loops',
-        'raw_text': "The air crackled. The storm had passed, leaving behind a silence sharper than glass. Ezra took the first step, his heart hammering the rhythm he knew best.",
+        'title': 'Scene Title Placeholder', 
+        'story_title': 'Story Placeholder',
+        'raw_text': "Error: Could not retrieve text from database.",
     }
     processed_text_html = ""
-    
+    raw_triggers = []
+
     # 1. DATABASE FETCHING (Get real text/data)
     try:
         conn = get_db_connection()
@@ -216,9 +217,12 @@ def read_scene(scene_id):
             scene_data['raw_text'] = scene_result['scene_text']
             scene_data['story_title'] = scene_result['story_title']
             
-            # --- PROCESS TEXT SEGMENTATION ---
+            # --- PROCESS TEXT SEGMENTATION & MARKERS ---
             paragraphs = scene_data['raw_text'].split('\n\n')
             processed_text_html = "".join([f"<p>{p}</p>\n\n" for p in paragraphs])
+            
+            # --- FETCH TRIGGERS for Image/Audio Markers ---
+            # NOTE: We are skipping trigger logic for now to ensure stability
             
         cur.close()
         conn.close()
@@ -248,6 +252,7 @@ def read_scene(scene_id):
     </head><body>
         <div class="reading-area">
             <main class="text-column">
+                <p><a href="{url_for('story_library')}" style="color: #8B7D6C;">&larr; Back to Library</a> | <a href="{url_for('logout')}">Logout</a></p>
                 <h1 class="chapter-title">{scene_data['title']}</h1>
                 {processed_text_html}
             </main>
@@ -264,45 +269,36 @@ def read_scene(scene_id):
 def secure_media_proxy(scene_id, filename):
     if 'user_id' not in session: return abort(401)
     
+    # 1. FETCH NECESSARY SLUGS (Required for S3 Key Construction)
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # 1. FIND FILE ID: Query media_sync to find the file_id for this scene/trigger
-        # We assume the media_sync table is linked by the file_id field.
-        sql_file_id = """
-        SELECT ms.file_id, ms.media_type
+        # Query DB to get the essential slugs and media type
+        sql_query = """
+        SELECT st.book_slug, se.series_slug, ms.media_type
         FROM website.media_sync ms
-        JOIN website.files f ON ms.file_id = f.file_id
-        WHERE ms.scene_id = %s AND f.file_name = %s;
-        """
-        cur.execute(sql_file_id, (scene_id, filename))
-        file_link = cur.fetchone()
-
-        if not file_link: return abort(404)
-        
-        # 2. GET SLUGS & FINAL PATH COMPONENTS: Query base tables to get path slugs
-        sql_path_slugs = """
-        SELECT st.book_slug, se.series_slug
-        FROM website.scenes s
+        JOIN website.scenes s ON ms.scene_id = s.scene_id
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
-        WHERE s.scene_id = %s;
+        WHERE ms.scene_id = %s AND ms.file_name = %s;
         """
-        cur.execute(sql_path_slugs, (scene_id,))
-        slugs = cur.fetchone()
-        
+        cur.execute(sql_query, (scene_id, filename))
+        db_result = cur.fetchone()
         cur.close(); conn.close()
 
-        if not slugs: return abort(404) 
-
-        # 3. GENERATE SECURE S3 URL (Final, stable URL generation)
+        if not db_result: 
+            print(f"Proxy Error: Media mapping not found for scene {scene_id} and file {filename}.")
+            return abort(404)
+        
+        # 2. GENERATE SECURE S3 URL
         signed_url = generate_signed_s3_url(
-            slugs['series_slug'], slugs['book_slug'], filename, file_link['media_type']
+            db_result['series_slug'], db_result['book_slug'], filename, db_result['media_type']
         )
         
         if signed_url:
+            # 3. REDIRECT: Send the browser to the secure, time-limited S3 link
             return redirect(signed_url, code=302)
         else:
             return abort(404)
