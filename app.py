@@ -3,9 +3,9 @@ import secrets
 import boto3
 from botocore.exceptions import ClientError
 from flask import Flask, render_template_string, redirect, url_for, request, session, abort
+import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
-import psycopg2 
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -49,6 +49,7 @@ def generate_signed_s3_url(series_slug, book_slug, filename, media_type):
     if client is None: return None
     
     media_folder = 'images' if media_type == 'image' else 'audio'
+    # Final, corrected S3 key path construction
     s3_key = (f"media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{filename}")
 
     try:
@@ -128,7 +129,6 @@ def login_submit():
         session['username'] = user['username']
         return redirect(url_for('story_library'))
     else:
-        # Final version would use: if user and check_password_hash(user['password_hash'], password_input):
         return redirect(url_for('login_page', error='invalid'))
 
 @app.route('/logout')
@@ -136,7 +136,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# --- 4. APPLICATION CORE HANDLERS ---
+# --- 3. APPLICATION CORE HANDLERS ---
 
 @app.route('/')
 def story_library():
@@ -160,7 +160,25 @@ def story_library():
     story_list_html = ""
     if stories:
         for story in stories:
-            scene_link = url_for('read_scene', scene_id=1) 
+            # FIX: Get the actual start scene ID for the link
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                # Find the smallest scene_id linked to this story
+                start_scene_query = """
+                    SELECT MIN(sc.scene_id)
+                    FROM website.chapters ch
+                    JOIN website.scenes sc ON sc.chapter_id = ch.chapter_id
+                    WHERE ch.story_id = %s;
+                """
+                cur.execute(start_scene_query, (story['story_id'],))
+                start_scene_id = cur.fetchone()[0] or 1 # Use 1 as fallback
+                cur.close(); conn.close()
+            except:
+                start_scene_id = 1 # Fallback on error
+                
+            scene_link = url_for('read_scene', scene_id=start_scene_id) 
+            
             story_list_html += f"""
             <div style="border: 1px solid #E0E0E0; padding: 20px; margin-bottom: 15px; border-radius: 8px; background-color: #FFFFFF;">
                 <h3 style="margin: 0 0 5px; font-family: 'Cormorant Garamond', serif; color: #8B7D6C;">{story['story_title']} ({story['series_slug']})</h3>
@@ -202,27 +220,50 @@ def read_scene(scene_id):
         SELECT
             s.scene_title, s.scene_text, 
             st.story_title, st.book_slug,
-            se.series_slug
+            se.series_slug,
+            f.file_name, ms.text_trigger_id, ms.media_type
         FROM website.scenes s
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
+        LEFT JOIN website.media_sync ms ON ms.scene_id = s.scene_id
+        LEFT JOIN website.files f ON ms.file_id = f.file_id
         WHERE s.scene_id = %s;
         """
         cur.execute(sql_query, (scene_id,))
-        scene_result = cur.fetchone()
+        scene_result = cur.fetchall()
         
         if scene_result:
-            scene_data['title'] = scene_result['scene_title']
-            scene_data['raw_text'] = scene_result['scene_text']
-            scene_data['story_title'] = scene_result['story_title']
+            first_row = scene_result[0]
+            scene_data['title'] = first_row['scene_title']
+            scene_data['raw_text'] = first_row['scene_text']
+            scene_data['story_title'] = first_row['story_title']
+            scene_data['series_slug'] = first_row['series_slug']
+            scene_data['book_slug'] = first_row['book_slug']
             
             # --- PROCESS TEXT SEGMENTATION & MARKERS ---
             paragraphs = scene_data['raw_text'].split('\n\n')
-            processed_text_html = "".join([f"<p>{p}</p>\n\n" for p in paragraphs])
             
-            # --- FETCH TRIGGERS for Image/Audio Markers ---
-            # NOTE: We are skipping trigger logic for now to ensure stability
+            media_triggers = []
+            for row in scene_result:
+                 if row.get('media_type') == 'image' and row.get('file_name'):
+                    media_triggers.append({
+                        'trigger_id': row['text_trigger_id'],
+                        'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=row['file_name']),
+                    })
+
+            # --- SEGMENTATION AND MARKER INSERTION ---
+            processed_text_html = ""
+            for i, p in enumerate(paragraphs):
+                unique_trigger_id = f'p-{scene_id}-{i + 1}'
+                trigger_data = next((t for t in media_triggers if t['trigger_id'] == unique_trigger_id), None)
+                
+                if trigger_data:
+                    processed_text_html += (
+                        f'<p id="{unique_trigger_id}" data-image-url="{trigger_data["media_path"]}" class="trigger-point-active">{p}</p>\n\n'
+                    )
+                else:
+                    processed_text_html += f"<p>{p}</p>\n\n"
             
         cur.close()
         conn.close()
@@ -232,7 +273,8 @@ def read_scene(scene_id):
         pass 
     
     # Final default URL for the image
-    default_image_url = url_for('secure_media_proxy', scene_id=scene_id, filename='test-image.jpg') 
+    # Fallback to the first available image URL, or a blank placeholder
+    default_image_url = media_triggers[0]['media_path'] if media_triggers else url_for('secure_media_proxy', scene_id=scene_id, filename='test-image.jpg') 
     
     # --- 2. RENDER FINAL PAGE (WITH VISUAL POLISH) ---
     
@@ -260,6 +302,35 @@ def read_scene(scene_id):
                 <img id="dynamic-scene-image" class="scene-image" src="{default_image_url}" alt="Scene Illustration">
             </aside>
         </div>
+        <script>
+            // --- JS INTERSECTION OBSERVER LOGIC ---
+            const dynamicImage = document.getElementById('dynamic-scene-image');
+            const triggers = document.querySelectorAll('.trigger-point-active');
+
+            const options = {{
+                root: null,
+                rootMargin: '0px 0px -40% 0px',
+                threshold: 0
+            }};
+
+            const observer = new IntersectionObserver((entries) => {{
+                entries.forEach(entry => {{
+                    if (entry.isIntersecting) {{
+                        const imageUrl = entry.target.getAttribute('data-image-url');
+                        if (dynamicImage.src !== imageUrl) {{
+                            dynamicImage.style.opacity = '0';
+                            setTimeout(() => {{
+                                dynamicImage.src = imageUrl;
+                                dynamicImage.style.opacity = '1';
+                            }}, 300);
+                        }}
+                    }}
+                }});
+            }}, options);
+            triggers.forEach(p => {{
+                observer.observe(p);
+            }});
+        </script>
     </body></html>
     """
     return render_template_string(html_content)
@@ -274,15 +345,16 @@ def secure_media_proxy(scene_id, filename):
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Query DB to get the essential slugs and media type
+        # FIX: Join files table to get media type and ensure integrity
         sql_query = """
-        SELECT st.book_slug, se.series_slug, ms.media_type
+        SELECT st.book_slug, se.series_slug, f.file_type 
         FROM website.media_sync ms
+        JOIN website.files f ON ms.file_id = f.file_id
         JOIN website.scenes s ON ms.scene_id = s.scene_id
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
-        WHERE ms.scene_id = %s AND ms.file_name = %s;
+        WHERE ms.scene_id = %s AND f.file_name = %s;
         """
         cur.execute(sql_query, (scene_id, filename))
         db_result = cur.fetchone()
@@ -294,7 +366,7 @@ def secure_media_proxy(scene_id, filename):
         
         # 2. GENERATE SECURE S3 URL
         signed_url = generate_signed_s3_url(
-            db_result['series_slug'], db_result['book_slug'], filename, db_result['media_type']
+            db_result['series_slug'], db_result['book_slug'], filename, db_result['file_type']
         )
         
         if signed_url:
