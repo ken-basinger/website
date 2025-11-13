@@ -264,36 +264,45 @@ def read_scene(scene_id):
 def secure_media_proxy(scene_id, filename):
     if 'user_id' not in session: return abort(401)
     
-    # 1. FETCH NECESSARY SLUGS (Required for S3 Key Construction)
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Query DB to get the essential slugs and media type by joining the media_sync table
-        sql_query = """
-        SELECT st.book_slug, se.series_slug, ms.media_type
+        # 1. FIND FILE ID: Query media_sync to find the file_id for this scene/trigger
+        # We assume the media_sync table is linked by the file_id field.
+        sql_file_id = """
+        SELECT ms.file_id, ms.media_type
         FROM website.media_sync ms
-        JOIN website.scenes s ON ms.scene_id = s.scene_id
+        JOIN website.files f ON ms.file_id = f.file_id
+        WHERE ms.scene_id = %s AND f.file_name = %s;
+        """
+        cur.execute(sql_file_id, (scene_id, filename))
+        file_link = cur.fetchone()
+
+        if not file_link: return abort(404)
+        
+        # 2. GET SLUGS & FINAL PATH COMPONENTS: Query base tables to get path slugs
+        sql_path_slugs = """
+        SELECT st.book_slug, se.series_slug
+        FROM website.scenes s
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
-        WHERE ms.scene_id = %s AND ms.file_name = %s;
+        WHERE s.scene_id = %s;
         """
-        cur.execute(sql_query, (scene_id, filename))
-        db_result = cur.fetchone()
+        cur.execute(sql_path_slugs, (scene_id,))
+        slugs = cur.fetchone()
+        
         cur.close(); conn.close()
 
-        if not db_result: 
-            print(f"Proxy Error: Media mapping not found for scene {scene_id} and file {filename}.")
-            return abort(404)
-        
-        # 2. GENERATE SECURE S3 URL
+        if not slugs: return abort(404) 
+
+        # 3. GENERATE SECURE S3 URL (Final, stable URL generation)
         signed_url = generate_signed_s3_url(
-            db_result['series_slug'], db_result['book_slug'], filename, db_result['media_type']
+            slugs['series_slug'], slugs['book_slug'], filename, file_link['media_type']
         )
         
         if signed_url:
-            # 3. REDIRECT: Send the browser to the secure, time-limited S3 link
             return redirect(signed_url, code=302)
         else:
             return abort(404)
