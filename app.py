@@ -3,9 +3,9 @@ import secrets
 import boto3
 from botocore.exceptions import ClientError
 from flask import Flask, render_template_string, redirect, url_for, request, session, abort
-import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
+import psycopg2 # Ensure psycopg2 is imported
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -121,9 +121,7 @@ def login_submit():
         print(f"CRITICAL AUTHENTICATION DB ERROR: {e}")
         return redirect(url_for('login_page', error='db_fail'))
 
-    # 2. SECURE HASH CHECK (Simulated success due to serverless constraints)
-    # The actual secure check is computationally intensive and relies on a working bcrypt/argon2 implementation.
-    # We simulate success based on test credentials for structural stability.
+    # 2. SECURE HASH CHECK (Simulated success for now)
     
     if user and password_input == 'testpass': # TEMPORARY: Placeholder for working hash check
         session['user_id'] = user['user_id']
@@ -138,7 +136,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# --- 3. APPLICATION CORE HANDLERS ---
+# --- 4. APPLICATION CORE HANDLERS ---
 
 @app.route('/')
 def story_library():
@@ -196,8 +194,8 @@ def read_scene(scene_id):
     # 1. DATABASE FETCHING (Get real text/data)
     try:
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor) # Use RealDictCursor for simpler fetching
-
+        cur = conn.cursor(cursor_factory=RealDictCursor) 
+        
         # Get scene details and story/series slugs
         sql_query = """
         SELECT
@@ -218,7 +216,7 @@ def read_scene(scene_id):
             scene_data['raw_text'] = scene_result['scene_text']
             scene_data['story_title'] = scene_result['story_title']
             
-            # --- PROCESS TEXT SEGMENTATION (Minimalist for now) ---
+            # --- PROCESS TEXT SEGMENTATION ---
             paragraphs = scene_data['raw_text'].split('\n\n')
             processed_text_html = "".join([f"<p>{p}</p>\n\n" for p in paragraphs])
             
@@ -227,7 +225,6 @@ def read_scene(scene_id):
         
     except Exception as e:
         print(f"CRITICAL SCENE FETCH ERROR: {e}")
-        # Pass (allowing the default placeholder text to display on error)
         pass 
     
     # Final default URL for the image
@@ -267,5 +264,6 @@ def read_scene(scene_id):
 def secure_media_proxy(scene_id, filename):
     if 'user_id' not in session: return abort(401)
     
-    # This is the placeholder for the S3 URL generation logic
+    # Actual S3 URL generation logic here
+    # Temporary placeholder for testing structure
     return redirect("https://external-placeholder.com/test-image.jpg", code=302)
