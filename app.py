@@ -224,7 +224,7 @@ def read_chapter(chapter_id):
             s.scene_id, s.scene_order, s.scene_title, s.scene_text, 
             ch.chapter_title, st.story_title, st.book_slug,
             se.series_slug,
-            f.file_name, ms.text_trigger_id, ms.media_type
+            f.file_pass_name, ms.text_trigger_id, ms.media_type
         FROM website.scenes s
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
@@ -362,7 +362,7 @@ def secure_media_proxy(scene_id, filename):
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
-        WHERE ms.scene_id = %s AND f.file_name = %s;
+        WHERE ms.scene_id = %s AND f.file_pass_name = %s;
         """
         cur.execute(sql_query, (scene_id, filename))
         db_result = cur.fetchone()
