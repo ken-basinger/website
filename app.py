@@ -136,7 +136,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# --- 3. APPLICATION CORE HANDLERS ---
+# --- 4. APPLICATION CORE HANDLERS ---
 
 @app.route('/')
 def story_library():
@@ -238,8 +238,6 @@ def read_scene(scene_id):
             scene_data['title'] = first_row['scene_title']
             scene_data['raw_text'] = first_row['scene_text']
             scene_data['story_title'] = first_row['story_title']
-            scene_data['series_slug'] = first_row['series_slug']
-            scene_data['book_slug'] = first_row['book_slug']
             
             # --- PROCESS TEXT SEGMENTATION & MARKERS ---
             paragraphs = scene_data['raw_text'].split('\n\n')
@@ -247,9 +245,10 @@ def read_scene(scene_id):
             media_triggers = []
             for row in scene_result:
                  if row.get('media_type') == 'image' and row.get('file_name'):
+                    filename = row['file_name'] 
                     media_triggers.append({
                         'trigger_id': row['text_trigger_id'],
-                        'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=row['file_name']),
+                        'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
                     })
 
             # --- SEGMENTATION AND MARKER INSERTION ---
@@ -273,8 +272,7 @@ def read_scene(scene_id):
         pass 
     
     # Final default URL for the image
-    # Fallback to the first available image URL, or a blank placeholder
-    default_image_url = media_triggers[0]['media_path'] if media_triggers else url_for('secure_media_proxy', scene_id=scene_id, filename='test-image.jpg') 
+    default_image_url = url_for('secure_media_proxy', scene_id=scene_id, filename='test-image.jpg') 
     
     # --- 2. RENDER FINAL PAGE (WITH VISUAL POLISH) ---
     
@@ -345,9 +343,9 @@ def secure_media_proxy(scene_id, filename):
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # FIX: Join files table to get media type and ensure integrity
+        # Query DB to get the essential slugs and media type
         sql_query = """
-        SELECT st.book_slug, se.series_slug, f.file_type 
+        SELECT st.book_slug, se.series_slug, f.file_type
         FROM website.media_sync ms
         JOIN website.files f ON ms.file_id = f.file_id
         JOIN website.scenes s ON ms.scene_id = s.scene_id
