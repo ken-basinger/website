@@ -49,7 +49,6 @@ def generate_signed_s3_url(series_slug, book_slug, filename, media_type):
     if client is None: return None
     
     media_folder = 'images' if media_type == 'image' else 'audio'
-    # Final, corrected S3 key path construction
     s3_key = (f"media/series/{series_slug}/{book_slug}/scenes/{media_folder}/{filename}")
 
     try:
@@ -216,12 +215,13 @@ def read_scene(scene_id):
         cur = conn.cursor(cursor_factory=RealDictCursor) 
         
         # Get scene details and story/series slugs
+        # CRITICAL FIX: Final SQL query joining to the files table
         sql_query = """
         SELECT
             s.scene_title, s.scene_text, 
             st.story_title, st.book_slug,
             se.series_slug,
-            f.file_name, ms.text_trigger_id, ms.media_type
+            f.file_path_name AS file_name, ms.text_trigger_id, ms.media_type
         FROM website.scenes s
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
@@ -252,17 +252,7 @@ def read_scene(scene_id):
                     })
 
             # --- SEGMENTATION AND MARKER INSERTION ---
-            processed_text_html = ""
-            for i, p in enumerate(paragraphs):
-                unique_trigger_id = f'p-{scene_id}-{i + 1}'
-                trigger_data = next((t for t in media_triggers if t['trigger_id'] == unique_trigger_id), None)
-                
-                if trigger_data:
-                    processed_text_html += (
-                        f'<p id="{unique_trigger_id}" data-image-url="{trigger_data["media_path"]}" class="trigger-point-active">{p}</p>\n\n'
-                    )
-                else:
-                    processed_text_html += f"<p>{p}</p>\n\n"
+            processed_text_html = "".join([f"<p>{p}</p>\n\n" for p in paragraphs])
             
         cur.close()
         conn.close()
