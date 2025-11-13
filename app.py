@@ -6,6 +6,7 @@ from flask import Flask, render_template_string, redirect, url_for, request, ses
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
+import re # We need this for sentence splitting
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -135,7 +136,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# --- 4. APPLICATION CORE HANDLERS ---
+# --- 3. APPLICATION CORE HANDLERS ---
 
 @app.route('/')
 def story_library():
@@ -159,29 +160,29 @@ def story_library():
     story_list_html = ""
     if stories:
         for story in stories:
-            # FIX: Get the actual start scene ID for the link
+            # FIX: Get the actual start scene ID for the link (Scene ID is now just the Chapter ID)
             try:
                 conn = get_db_connection()
-                cur = conn.cursor()
-                # Find the smallest scene_id linked to this story
-                start_scene_query = """
-                    SELECT MIN(sc.scene_id)
-                    FROM website.chapters ch
-                    JOIN website.scenes sc ON sc.chapter_id = ch.chapter_id
-                    WHERE ch.story_id = %s;
+                cur = conn.cursor(cursor_factory=RealDictCursor)
+                # Find the lowest chapter_id linked to this story
+                start_chapter_query = """
+                    SELECT MIN(chapter_id) AS start_id
+                    FROM website.chapters 
+                    WHERE story_id = %s;
                 """
-                cur.execute(start_scene_query, (story['story_id'],))
-                start_scene_id = cur.fetchone()[0] or 1 # Use 1 as fallback
+                cur.execute(start_chapter_query, (story['story_id'],))
+                start_chapter_id = cur.fetchone()['start_id'] or 1 # Use 1 as fallback
                 cur.close(); conn.close()
             except:
-                start_scene_id = 1 # Fallback on error
+                start_chapter_id = 1 # Fallback on error
                 
-            scene_link = url_for('read_scene', scene_id=start_scene_id) 
+            # NOTE: New link goes to the read_chapter route
+            chapter_link = url_for('read_chapter', chapter_id=start_chapter_id) 
             
             story_list_html += f"""
             <div style="border: 1px solid #E0E0E0; padding: 20px; margin-bottom: 15px; border-radius: 8px; background-color: #FFFFFF;">
                 <h3 style="margin: 0 0 5px; font-family: 'Cormorant Garamond', serif; color: #8B7D6C;">{story['story_title']} ({story['series_slug']})</h3>
-                <p><a href="{scene_link}">Start Reading</a></p>
+                <p><a href="{chapter_link}">Start Reading</a></p>
             </div>
             """
     else:
@@ -197,93 +198,137 @@ def story_library():
     """
     return render_template_string(html_content)
 
-@app.route('/read/<int:scene_id>')
-def read_scene(scene_id):
+# NEW ROUTE: Reads an entire chapter (combines all scenes)
+@app.route('/read/chapter/<int:chapter_id>')
+def read_chapter(chapter_id):
     if 'user_id' not in session: return redirect(url_for('login_page'))
     
-    scene_data = {
-        'title': 'Scene Title Placeholder', 
+    # Initialize variables for safe template rendering
+    chapter_info = {
+        'title': 'Chapter Title Placeholder', 
         'story_title': 'Story Placeholder',
-        'raw_text': "Error: Could not retrieve text from database.",
+        'series_slug': '',
+        'book_slug': ''
     }
     processed_text_html = ""
-    raw_triggers = []
+    full_media_triggers = [] # Stores all triggers for the entire chapter
 
-    # 1. DATABASE FETCHING (Get real text/data)
+    # 1. DATABASE FETCHING (Get all scenes and triggers for the Chapter)
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor) 
         
-        # Get scene details and story/series slugs
-        # CRITICAL FIX: Final SQL query joining to the files table
+        # --- QUERY: Fetch ALL scenes and related story/media data for the given Chapter ID ---
         sql_query = """
         SELECT
-            s.scene_title, s.scene_text, 
-            st.story_title, st.book_slug,
+            s.scene_id, s.scene_order, s.scene_title, s.scene_text, 
+            ch.chapter_title, st.story_title, st.book_slug,
             se.series_slug,
-            f.file_path_name AS file_name, ms.text_trigger_id, ms.media_type
+            f.file_name, ms.text_trigger_id, ms.media_type
         FROM website.scenes s
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
         LEFT JOIN website.media_sync ms ON ms.scene_id = s.scene_id
         LEFT JOIN website.files f ON ms.file_id = f.file_id
-        WHERE s.scene_id = %s;
+        WHERE s.chapter_id = %s
+        ORDER BY s.scene_order ASC;
         """
-        cur.execute(sql_query, (scene_id,))
-        scene_result = cur.fetchall()
+        cur.execute(sql_query, (chapter_id,))
+        chapter_data = cur.fetchall()
         
-        if scene_result:
-            first_row = scene_result[0]
-            scene_data['title'] = first_row['scene_title']
-            scene_data['raw_text'] = first_row['scene_text']
-            scene_data['story_title'] = first_row['story_title']
+        if not chapter_data: return abort(404)
+        
+        first_row = chapter_data[0]
+        chapter_info = {
+            'title': first_row['chapter_title'],
+            'story_title': first_row['story_title'],
+            'series_slug': first_row['series_slug'],
+            'book_slug': first_row['book_slug'],
+        }
+        
+        # 2. ASSEMBLE CONTENT AND MARKERS (The Scrollytelling Stitch)
+        
+        for scene_row in chapter_data:
+            scene_id = scene_row['scene_id']
+            raw_text = scene_row['scene_text']
             
-            # --- PROCESS TEXT SEGMENTATION & MARKERS ---
-            paragraphs = scene_data['raw_text'].split('\n\n')
+            # Start of Scene Divider (Visual break and major trigger)
+            # Use scene_id for the major visual trigger
+            processed_text_html += f'<div id="scene-{scene_id}" class="scene-divider trigger-point-major"><h2 class="scene-title">{scene_row["scene_title"]}</h2></div>'
             
-            media_triggers = []
-            for row in scene_result:
-                 if row.get('media_type') == 'image' and row.get('file_name'):
-                    filename = row['file_name'] 
-                    media_triggers.append({
-                        'trigger_id': row['text_trigger_id'],
-                        'media_path': url_for('secure_media_proxy', scene_id=scene_id, filename=filename),
-                    })
+            # --- SENTENCE SEGMENTATION FOR AUDIO SYNC (Future Proofing) ---
+            # Regex splits the text into sentences while keeping the punctuation.
+            sentences = re.split('([.!?])', raw_text)
+            sentence_fragments = []
+            
+            # Recombine sentence fragments and punctuation
+            for i in range(0, len(sentences) - 1, 2):
+                if i + 1 < len(sentences):
+                    sentence_fragments.append(sentences[i].strip() + sentences[i+1])
+            
+            # Use the sentence fragments to assemble the paragraph structure
+            paragraph_html = ""
+            current_paragraph_content = ""
+            
+            for i, sentence in enumerate(sentence_fragments):
+                # Unique Sentence ID (s-sceneId-sentenceOrder)
+                sentence_id = f's-{scene_id}-{i + 1}'
 
-            # --- SEGMENTATION AND MARKER INSERTION ---
-            processed_text_html = "".join([f"<p>{p}</p>\n\n" for p in paragraphs])
+                # Check if this sentence is also the start of a new paragraph (marked by two spaces or more)
+                is_new_paragraph = sentence.strip().endswith('  ') 
+                
+                # Check for existing media trigger on this sentence (for future audio sync)
+                trigger_data = next((row for row in chapter_data if row.get('text_trigger_id') == sentence_id), None)
+                
+                # Wrap the sentence in a span for fine-grained control
+                sentence_html = f'<span id="{sentence_id}">{sentence}</span> '
+                
+                if is_new_paragraph and current_paragraph_content:
+                    paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
+                    current_paragraph_content = sentence_html
+                else:
+                    current_paragraph_content += sentence_html
+                    
+            if current_paragraph_content:
+                paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
             
+            processed_text_html += paragraph_html
+
+
         cur.close()
         conn.close()
         
     except Exception as e:
-        print(f"CRITICAL SCENE FETCH ERROR: {e}")
-        pass 
+        print(f"CRITICAL CHAPTER FETCH ERROR: {e}")
+        processed_text_html = f"<p>Error: Could not retrieve text from database. {e}</p>"
+
+    # 3. RENDER FINAL PAGE
     
-    # Final default URL for the image
-    default_image_url = url_for('secure_media_proxy', scene_id=scene_id, filename='test-image.jpg') 
-    
-    # --- 2. RENDER FINAL PAGE (WITH VISUAL POLISH) ---
+    # Final default URL for the image: Use a placeholder until the main trigger fires
+    default_image_url = url_for('secure_media_proxy', scene_id=chapter_id, filename='default-cover.jpg') 
     
     html_content = f"""
     <!DOCTYPE html><html><head>
-        <title>{scene_data['title']} | {scene_data['story_title']}</title>
+        <title>{chapter_info['title']} | {chapter_info['story_title']}</title>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:wght@400;700&family=Cormorant+Garamond:wght@300;700&display=swap">
         <style>
-            /* --- High-End Editorial Theme CSS (Full Layout Fix) --- */
+            /* --- High-End Editorial Theme CSS (Visual Polish Integrated) --- */
             body {{ background-color: #F8F6F0; color: #262626; font-family: 'Tinos', serif; margin: 0; padding: 0; }}
             .reading-area {{ display: grid; grid-template-columns: minmax(600px, 800px) 1fr; max-width: 1400px; margin: 0 auto; }}
             .text-column {{ padding: 3rem 4rem; font-size: 1.25rem; line-height: 1.8; }}
             .chapter-title {{ font-family: 'Cormorant Garamond', serif; font-weight: 300; font-size: 4rem; color: #8B7D6C; margin-bottom: 3rem; }}
+            .scene-divider {{ border-top: 1px solid #E0E0E0; margin-top: 4rem; padding-top: 2rem; }}
+            .scene-title {{ font-size: 1.5rem; color: #666; font-weight: 400; }}
+            /* Sticky Media Styles */
             .media-column-sticky {{ position: sticky; top: 0; height: 100vh; padding: 4rem 2rem; box-sizing: border-box; }}
-            .scene-image {{ width: 100%; border-radius: 4px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); }}
+            .scene-image {{ width: 100%; border-radius: 4px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); transition: opacity 0.3s ease; }}
         </style>
     </head><body>
         <div class="reading-area">
             <main class="text-column">
                 <p><a href="{url_for('story_library')}" style="color: #8B7D6C;">&larr; Back to Library</a> | <a href="{url_for('logout')}">Logout</a></p>
-                <h1 class="chapter-title">{scene_data['title']}</h1>
+                <h1 class="chapter-title">{chapter_info['title']}</h1>
                 {processed_text_html}
             </main>
             <aside class="media-column-sticky">
@@ -292,32 +337,7 @@ def read_scene(scene_id):
         </div>
         <script>
             // --- JS INTERSECTION OBSERVER LOGIC ---
-            const dynamicImage = document.getElementById('dynamic-scene-image');
-            const triggers = document.querySelectorAll('.trigger-point-active');
-
-            const options = {{
-                root: null,
-                rootMargin: '0px 0px -40% 0px',
-                threshold: 0
-            }};
-
-            const observer = new IntersectionObserver((entries) => {{
-                entries.forEach(entry => {{
-                    if (entry.isIntersecting) {{
-                        const imageUrl = entry.target.getAttribute('data-image-url');
-                        if (dynamicImage.src !== imageUrl) {{
-                            dynamicImage.style.opacity = '0';
-                            setTimeout(() => {{
-                                dynamicImage.src = imageUrl;
-                                dynamicImage.style.opacity = '1';
-                            }}, 300);
-                        }}
-                    }}
-                }});
-            }}, options);
-            triggers.forEach(p => {{
-                observer.observe(p);
-            }});
+            // (Final JS logic for scrolling animation would be here)
         </script>
     </body></html>
     """
