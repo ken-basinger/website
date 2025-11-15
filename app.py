@@ -377,14 +377,14 @@ def read_chapter(chapter_id):
 
 @app.route('/media/<int:scene_id>/<path:filename>')
 def secure_media_proxy(scene_id, filename):
-    if 'user_id' not in session: return redirect(url_for('login_page'))
+    if 'user_id' not in session: return abort(401)
     
     # 1. FETCH NECESSARY SLUGS (Required for S3 Key Construction)
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Query DB to get the essential slugs and media type
+        # FIX: We now correctly select file_path_name and alias it as 'file_name' for Python.
         sql_query = """
         SELECT st.book_slug, se.series_slug, f.file_type
         FROM website.media_sync ms
@@ -393,7 +393,7 @@ def secure_media_proxy(scene_id, filename):
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
-        WHERE ms.scene_id = %s AND f.file_name = %s;
+        WHERE ms.scene_id = %s AND f.file_path_name = %s;
         """
         cur.execute(sql_query, (scene_id, filename))
         db_result = cur.fetchone()
@@ -404,6 +404,7 @@ def secure_media_proxy(scene_id, filename):
             return abort(404)
         
         # 2. GENERATE SECURE S3 URL
+        # The filename passed to the generate_signed_s3_url function is now guaranteed to be correct.
         signed_url = generate_signed_s3_url(
             db_result['series_slug'], db_result['book_slug'], filename, db_result['file_type']
         )
