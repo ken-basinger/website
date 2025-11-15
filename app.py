@@ -136,7 +136,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# --- 4. APPLICATION CORE HANDLERS ---
+# --- 3. APPLICATION CORE HANDLERS ---
 
 @app.route('/')
 def story_library():
@@ -207,10 +207,10 @@ def read_chapter(chapter_id):
         'story_title': 'Story Placeholder',
         'raw_text': "Error: Could not retrieve text from database.",
         'series_slug': '',
-        'book_slug': ''
+        'book_slug': '',
+        'chapter_title': 'Chapter Title Placeholder',
     }
     processed_text_html = ""
-    raw_triggers = []
 
     # 1. DATABASE FETCHING (Get all scenes and triggers for the Chapter)
     try:
@@ -218,11 +218,11 @@ def read_chapter(chapter_id):
         cur = conn.cursor(cursor_factory=RealDictCursor) 
         
         # Get scene details and story/series slugs
-        # FINAL SQL: Joins to the files table to get the file_path_name
+        # CRITICAL FIX: Final SQL query joining to the files table
         sql_query = """
         SELECT
             s.scene_id, s.scene_title, s.scene_text, 
-            st.story_title, st.book_slug,
+            ch.chapter_title, st.story_title, st.book_slug,
             se.series_slug,
             f.file_path_name AS file_name, ms.text_trigger_id, ms.media_type
         FROM website.scenes s
@@ -241,35 +241,82 @@ def read_chapter(chapter_id):
 
         # Assemble final data
         first_row = chapter_data[0]
-        scene_data = {
-            'title': first_row['chapter_title'], # Now fetches chapter title
-            'raw_text': "".join([row['scene_text'] for row in chapter_data]), # Concatenate all scene text (FIXED)
+        chapter_info = {
+            'title': first_row['chapter_title'],
             'story_title': first_row['story_title'],
             'series_slug': first_row['series_slug'],
             'book_slug': first_row['book_slug'],
         }
         
-        # --- PROCESS TEXT SEGMENTATION & MARKERS ---
-        # NOTE: This complex segmentation logic needs the full raw text (currently not passed correctly)
+        # 2. ASSEMBLE CONTENT AND MARKERS (The Scrollytelling Stitch)
+        processed_text_html = ""
         
-        # For structural stability, we render the raw text without markers for now
-        processed_text_html = f"<p>{scene_data['raw_text']}</p>" 
-        
+        for scene_row in chapter_data:
+            scene_id = scene_row['scene_id']
+            raw_text = scene_row['scene_text']
+            
+            # Start of Scene Divider (Visual break and major trigger)
+            processed_text_html += f'<div id="scene-{scene_id}" class="scene-divider trigger-point-major"><h2 class="scene-title">{scene_row["scene_title"]}</h2></div>'
+            
+            # --- SENTENCE SEGMENTATION & MARKER INSERTION (Sentence-Level Sync) ---
+            sentences = re.split('([.!?])', raw_text)
+            paragraph_html = ""
+            current_paragraph_content = ""
+            sentence_counter = 0
+
+            # Process sentences and insert markers
+            for i in range(0, len(sentences) - 1, 2):
+                if i + 1 >= len(sentences): break
+                
+                sentence = sentences[i].strip() + sentences[i+1]
+                sentence_counter += 1
+                
+                # Unique Sentence ID (s-sceneId-sentenceOrder)
+                sentence_marker_id = f's-{scene_id}-{sentence_counter}'
+
+                # Check for image trigger linked to this specific sentence ID
+                trigger_data = next((row for row in chapter_data if row.get('text_trigger_id') == sentence_marker_id), None)
+                
+                # Wrap the sentence in a span for fine-grained control (for audio highlighting)
+                sentence_html = f'<span id="{sentence_marker_id}">{sentence}</span> '
+                
+                # If an image trigger exists, add the data attribute around the sentence span
+                if trigger_data and trigger_data.get('file_name'):
+                    file_name = trigger_data['file_name']
+                    sentence_html = (
+                        f'<span class="trigger-point-active" data-image-url="{url_for("secure_media_proxy", scene_id=scene_id, filename=file_name)}">'
+                        f'{sentence_html}</span> '
+                    )
+
+                # Assemble paragraphs (Based on simple line breaks for stability)
+                is_new_paragraph = sentence.strip().endswith('  ') 
+                
+                if is_new_paragraph and current_paragraph_content:
+                    paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
+                    current_paragraph_content = sentence_html
+                else:
+                    current_paragraph_content += sentence_html
+                    
+            if current_paragraph_content:
+                paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
+            
+            processed_text_html += paragraph_html
+            
         cur.close()
         conn.close()
         
     except Exception as e:
-        print(f"CRITICAL SCENE FETCH ERROR: {e}")
-        return abort(500)
+        print(f"CRITICAL CHAPTER FETCH ERROR: {e}")
+        processed_text_html = f"<p>Error: Could not retrieve text from database. {e}</p>"
+
+    # 3. RENDER FINAL PAGE
     
-    # Final default URL for the image
+    # Final default URL for the image: Use a placeholder until the main trigger fires
     default_image_url = url_for('secure_media_proxy', scene_id=chapter_id, filename='default-cover.jpg') 
-    
-    # --- 2. RENDER FINAL PAGE (WITH VISUAL POLISH) ---
     
     html_content = f"""
     <!DOCTYPE html><html><head>
-        <title>{scene_data['title']} | {scene_data['story_title']}</title>
+        <title>{chapter_info['title']} | {chapter_info['story_title']}</title>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:wght@400;700&family=Cormorant+Garamond:wght@300;700&display=swap">
         <style>
             /* --- High-End Editorial Theme CSS (Full Layout Fix) --- */
@@ -277,14 +324,17 @@ def read_chapter(chapter_id):
             .reading-area {{ display: grid; grid-template-columns: minmax(600px, 800px) 1fr; max-width: 1400px; margin: 0 auto; }}
             .text-column {{ padding: 3rem 4rem; font-size: 1.25rem; line-height: 1.8; }}
             .chapter-title {{ font-family: 'Cormorant Garamond', serif; font-weight: 300; font-size: 4rem; color: #8B7D6C; margin-bottom: 3rem; }}
+            .scene-divider {{ border-top: 1px solid #E0E0E0; margin-top: 4rem; padding-top: 2rem; }}
+            .scene-title {{ font-size: 1.5rem; color: #666; font-weight: 400; }}
+            /* Sticky Media Styles */
             .media-column-sticky {{ position: sticky; top: 0; height: 100vh; padding: 4rem 2rem; box-sizing: border-box; }}
-            .scene-image {{ width: 100%; border-radius: 4px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); }}
+            .scene-image {{ width: 100%; border-radius: 4px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); transition: opacity 0.3s ease; }}
         </style>
     </head><body>
         <div class="reading-area">
             <main class="text-column">
                 <p><a href="{url_for('story_library')}" style="color: #8B7D6C;">&larr; Back to Library</a> | <a href="{url_for('logout')}">Logout</a></p>
-                <h1 class="chapter-title">{scene_data['title']}</h1>
+                <h1 class="chapter-title">{chapter_info['title']}</h1>
                 {processed_text_html}
             </main>
             <aside class="media-column-sticky">
