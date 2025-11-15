@@ -6,7 +6,7 @@ from flask import Flask, render_template_string, redirect, url_for, request, ses
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
-import re # We need this for sentence splitting
+import re # CRUCIAL: For sentence segmentation
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -160,18 +160,18 @@ def story_library():
     story_list_html = ""
     if stories:
         for story in stories:
-            # FIX: Get the actual start scene ID for the link (Scene ID is now just the Chapter ID)
+            # FIX: Get the actual start scene ID for the link
             try:
                 conn = get_db_connection()
-                cur = conn.cursor(cursor_factory=RealDictCursor)
-                # Find the lowest chapter_id linked to this story
+                cur = conn.cursor()
+                # Find the smallest chapter_id linked to this story
                 start_chapter_query = """
                     SELECT MIN(chapter_id) AS start_id
                     FROM website.chapters 
                     WHERE story_id = %s;
                 """
                 cur.execute(start_chapter_query, (story['story_id'],))
-                start_chapter_id = cur.fetchone()['start_id'] or 1 # Use 1 as fallback
+                start_chapter_id = cur.fetchone()[0] or 1 # Use 1 as fallback
                 cur.close(); conn.close()
             except:
                 start_chapter_id = 1 # Fallback on error
@@ -211,7 +211,6 @@ def read_chapter(chapter_id):
         'book_slug': ''
     }
     processed_text_html = ""
-    full_media_triggers = [] # Stores all triggers for the entire chapter
 
     # 1. DATABASE FETCHING (Get all scenes and triggers for the Chapter)
     try:
@@ -224,7 +223,7 @@ def read_chapter(chapter_id):
             s.scene_id, s.scene_order, s.scene_title, s.scene_text, 
             ch.chapter_title, st.story_title, st.book_slug,
             se.series_slug,
-            f.file_pass_name, ms.text_trigger_id, ms.media_type
+            f.file_name, ms.text_trigger_id, ms.media_type
         FROM website.scenes s
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
@@ -254,10 +253,9 @@ def read_chapter(chapter_id):
             raw_text = scene_row['scene_text']
             
             # Start of Scene Divider (Visual break and major trigger)
-            # Use scene_id for the major visual trigger
             processed_text_html += f'<div id="scene-{scene_id}" class="scene-divider trigger-point-major"><h2 class="scene-title">{scene_row["scene_title"]}</h2></div>'
             
-            # --- SENTENCE SEGMENTATION FOR AUDIO SYNC (Future Proofing) ---
+            # --- SENTENCE SEGMENTATION & MARKER INSERTION (Sentence-Level Sync) ---
             # Regex splits the text into sentences while keeping the punctuation.
             sentences = re.split('([.!?])', raw_text)
             sentence_fragments = []
@@ -273,16 +271,25 @@ def read_chapter(chapter_id):
             
             for i, sentence in enumerate(sentence_fragments):
                 # Unique Sentence ID (s-sceneId-sentenceOrder)
-                sentence_id = f's-{scene_id}-{i + 1}'
+                sentence_marker_id = f's-{scene_id}-{i + 1}'
 
-                # Check if this sentence is also the start of a new paragraph (marked by two spaces or more)
-                is_new_paragraph = sentence.strip().endswith('  ') 
+                # Find image trigger linked to this specific sentence ID
+                trigger_data = next((row for row in chapter_data if row.get('text_trigger_id') == sentence_marker_id), None)
                 
-                # Check for existing media trigger on this sentence (for future audio sync)
-                trigger_data = next((row for row in chapter_data if row.get('text_trigger_id') == sentence_id), None)
+                # Wrap the sentence in a span for fine-grained control (for audio highlighting)
+                sentence_html = f'<span id="{sentence_marker_id}">{sentence}</span> '
                 
-                # Wrap the sentence in a span for fine-grained control
-                sentence_html = f'<span id="{sentence_id}">{sentence}</span> '
+                # Check for image trigger and insert the data attribute on the <span>
+                if trigger_data and trigger_data.get('file_name'):
+                    file_name = trigger_data['file_name']
+                    # Wrap the sentence span in an image trigger div
+                    sentence_html = (
+                        f'<span class="trigger-point-active" data-image-url="{url_for("secure_media_proxy", scene_id=scene_id, filename=file_name)}">'
+                        f'{sentence_html}</span> '
+                    )
+
+                # Assemble paragraphs based on original line breaks
+                is_new_paragraph = sentence.strip().endswith('  ') or sentence.strip().endswith('.\n') 
                 
                 if is_new_paragraph and current_paragraph_content:
                     paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
@@ -294,8 +301,7 @@ def read_chapter(chapter_id):
                 paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
             
             processed_text_html += paragraph_html
-
-
+            
         cur.close()
         conn.close()
         
@@ -313,7 +319,7 @@ def read_chapter(chapter_id):
         <title>{chapter_info['title']} | {chapter_info['story_title']}</title>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:wght@400;700&family=Cormorant+Garamond:wght@300;700&display=swap">
         <style>
-            /* --- High-End Editorial Theme CSS (Visual Polish Integrated) --- */
+            /* --- High-End Editorial Theme CSS (Full Layout Fix) --- */
             body {{ background-color: #F8F6F0; color: #262626; font-family: 'Tinos', serif; margin: 0; padding: 0; }}
             .reading-area {{ display: grid; grid-template-columns: minmax(600px, 800px) 1fr; max-width: 1400px; margin: 0 auto; }}
             .text-column {{ padding: 3rem 4rem; font-size: 1.25rem; line-height: 1.8; }}
@@ -337,7 +343,32 @@ def read_chapter(chapter_id):
         </div>
         <script>
             // --- JS INTERSECTION OBSERVER LOGIC ---
-            // (Final JS logic for scrolling animation would be here)
+            const dynamicImage = document.getElementById('dynamic-scene-image');
+            const triggers = document.querySelectorAll('.trigger-point-active');
+
+            const options = {{
+                root: null,
+                rootMargin: '0px 0px -40% 0px',
+                threshold: 0
+            }};
+
+            const observer = new IntersectionObserver((entries) => {{
+                entries.forEach(entry => {{
+                    if (entry.isIntersecting) {{
+                        const imageUrl = entry.target.getAttribute('data-image-url');
+                        if (dynamicImage.src !== imageUrl) {{
+                            dynamicImage.style.opacity = '0';
+                            setTimeout(() => {{
+                                dynamicImage.src = imageUrl;
+                                dynamicImage.style.opacity = '1';
+                            }}, 300);
+                        }}
+                    }}
+                }});
+            }}, options);
+            triggers.forEach(p => {{
+                observer.observe(p);
+            }});
         </script>
     </body></html>
     """
@@ -362,7 +393,7 @@ def secure_media_proxy(scene_id, filename):
         JOIN website.chapters ch ON s.chapter_id = ch.chapter_id
         JOIN website.stories st ON ch.story_id = st.story_id
         JOIN website.series se ON st.series_id = se.series_id
-        WHERE ms.scene_id = %s AND f.file_pass_name = %s;
+        WHERE ms.scene_id = %s AND f.file_name = %s;
         """
         cur.execute(sql_query, (scene_id, filename))
         db_result = cur.fetchone()
