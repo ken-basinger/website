@@ -6,7 +6,7 @@ from flask import Flask, render_template_string, redirect, url_for, request, ses
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from werkzeug.security import check_password_hash
-import re # CRUCIAL: For sentence segmentation
+import re # Needed for sentence splitting
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -160,7 +160,7 @@ def story_library():
     story_list_html = ""
     if stories:
         for story in stories:
-            # FIX: Get the actual start scene ID for the link
+            # FIX: Get the actual start chapter ID for the link
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
@@ -198,7 +198,6 @@ def story_library():
     """
     return render_template_string(html_content)
 
-# NEW ROUTE: Reads an entire chapter (combines all scenes)
 @app.route('/read/chapter/<int:chapter_id>')
 def read_chapter(chapter_id):
     if 'user_id' not in session: return redirect(url_for('login_page'))
@@ -248,49 +247,72 @@ def read_chapter(chapter_id):
         
         # 2. ASSEMBLE CONTENT AND MARKERS (The Scrollytelling Stitch)
         
-        for scene_row in chapter_data:
-            scene_id = scene_row['scene_id']
-            raw_text = scene_row['scene_text']
+        # Use a dictionary to group triggers by scene for easier assembly
+        scene_triggers = {}
+        for row in chapter_data:
+            scene_id = row['scene_id']
+            if row.get('text_trigger_id'):
+                 if scene_id not in scene_triggers:
+                     scene_triggers[scene_id] = []
+                 scene_triggers[scene_id].append({
+                     'trigger_id': row['text_trigger_id'],
+                     'file_name': row['file_name'],
+                     'media_type': row['media_type']
+                 })
+
+        # Process text scene by scene
+        processed_text_html = ""
+        
+        # Get unique scenes from the fetched data (to iterate over scenes once)
+        unique_scenes = {}
+        for row in chapter_data:
+            unique_scenes[row['scene_id']] = {
+                'title': row['scene_title'],
+                'text': row['scene_text'],
+                'order': row['scene_order']
+            }
+        
+        for scene_id in sorted(unique_scenes.keys()):
+            scene = unique_scenes[scene_id]
+            raw_text = scene['text']
             
             # Start of Scene Divider (Visual break and major trigger)
-            processed_text_html += f'<div id="scene-{scene_id}" class="scene-divider trigger-point-major"><h2 class="scene-title">{scene_row["scene_title"]}</h2></div>'
+            processed_text_html += f'<div id="scene-{scene_id}" class="scene-divider trigger-point-major"><h2 class="scene-title">{scene["title"]}</h2></div>'
             
-            # --- SENTENCE SEGMENTATION & MARKER INSERTION (Sentence-Level Sync) ---
-            # Regex splits the text into sentences while keeping the punctuation.
+            # --- SENTENCE SEGMENTATION & MARKER INSERTION (Final Logic) ---
             sentences = re.split('([.!?])', raw_text)
-            sentence_fragments = []
-            
-            # Recombine sentence fragments and punctuation
-            for i in range(0, len(sentences) - 1, 2):
-                if i + 1 < len(sentences):
-                    sentence_fragments.append(sentences[i].strip() + sentences[i+1])
-            
-            # Use the sentence fragments to assemble the paragraph structure
             paragraph_html = ""
             current_paragraph_content = ""
-            
-            for i, sentence in enumerate(sentence_fragments):
-                # Unique Sentence ID (s-sceneId-sentenceOrder)
-                sentence_marker_id = f's-{scene_id}-{i + 1}'
+            sentence_counter = 0
 
-                # Find image trigger linked to this specific sentence ID
-                trigger_data = next((row for row in chapter_data if row.get('text_trigger_id') == sentence_marker_id), None)
+            # Process sentences and insert markers
+            for i in range(0, len(sentences) - 1, 2):
+                if i + 1 >= len(sentences): break
+                
+                sentence = sentences[i].strip() + sentences[i+1]
+                sentence_counter += 1
+                
+                # Unique Sentence ID (s-sceneId-sentenceOrder)
+                sentence_marker_id = f's-{scene_id}-{sentence_counter}'
+
+                # Check if this sentence is also the start of a new paragraph
+                is_new_paragraph = sentence.strip().endswith('  ') 
+                
+                # Check for image trigger linked to this specific sentence ID
+                trigger_data = next((t for t in scene_triggers.get(scene_id, []) if t['trigger_id'] == sentence_marker_id), None)
                 
                 # Wrap the sentence in a span for fine-grained control (for audio highlighting)
-                sentence_html = f'<span id="{sentence_marker_id}">{sentence}</span> '
+                sentence_html = f'<span id="{sentence_marker_id}">{sentence}</span>'
                 
-                # Check for image trigger and insert the data attribute on the <span>
-                if trigger_data and trigger_data.get('file_name'):
+                # If an image trigger exists, add the data attribute around the sentence span
+                if trigger_data:
                     file_name = trigger_data['file_name']
-                    # Wrap the sentence span in an image trigger div
                     sentence_html = (
                         f'<span class="trigger-point-active" data-image-url="{url_for("secure_media_proxy", scene_id=scene_id, filename=file_name)}">'
                         f'{sentence_html}</span> '
                     )
 
-                # Assemble paragraphs based on original line breaks
-                is_new_paragraph = sentence.strip().endswith('  ') or sentence.strip().endswith('.\n') 
-                
+                # Assemble paragraphs
                 if is_new_paragraph and current_paragraph_content:
                     paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
                     current_paragraph_content = sentence_html
@@ -377,7 +399,7 @@ def read_chapter(chapter_id):
 
 @app.route('/media/<int:scene_id>/<path:filename>')
 def secure_media_proxy(scene_id, filename):
-    if 'user_id' not in session: return abort(401)
+    if 'user_id' not in session: return redirect(url_for('login_page'))
     
     # 1. FETCH NECESSARY SLUGS (Required for S3 Key Construction)
     try:
