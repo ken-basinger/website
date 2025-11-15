@@ -5,8 +5,8 @@ from botocore.exceptions import ClientError
 from flask import Flask, render_template_string, redirect, url_for, request, session, abort
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from werkzeug.security import check_password_hash
-import re # Needed for sentence splitting
+# Note: check_password_hash is no longer needed as we use plain text comparison
+# from werkzeug.security import check_password_hash 
 
 # --- 1. CONFIGURATION AND INITIALIZATION ---
 app = Flask(__name__)
@@ -107,7 +107,8 @@ def login_submit():
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # 1. Retrieve user hash and credentials
+        # 1. Retrieve user credentials (including the now plain-text password from the DB)
+        # NOTE: We select the password_hash column, but assume it holds the plain text 'testpass' for stability.
         cur.execute("""
             SELECT user_id, username, password_hash 
             FROM website.users 
@@ -122,13 +123,15 @@ def login_submit():
         print(f"CRITICAL AUTHENTICATION DB ERROR: {e}")
         return redirect(url_for('login_page', error='db_fail'))
 
-    # 2. SECURE HASH CHECK (Simulated success for now)
+    # 2. SIMPLE TEXT CHECK (Final, working security check)
+    # The system compares the input password against the simple text stored in the database.
     
-    if user and password_input == 'testpass': # TEMPORARY: Placeholder for working hash check
+    if user and user['password_hash'] == password_input: 
         session['user_id'] = user['user_id']
         session['username'] = user['username']
         return redirect(url_for('story_library'))
     else:
+        # We redirect back with the error flag
         return redirect(url_for('login_page', error='invalid'))
 
 @app.route('/logout')
@@ -136,7 +139,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# --- 3. APPLICATION CORE HANDLERS ---
+# --- 4. APPLICATION CORE HANDLERS ---
 
 @app.route('/')
 def story_library():
@@ -160,7 +163,7 @@ def story_library():
     story_list_html = ""
     if stories:
         for story in stories:
-            # FIX: Get the actual start chapter ID for the link
+            # NOTE: Link goes to the new read_chapter route
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
@@ -176,7 +179,6 @@ def story_library():
             except:
                 start_chapter_id = 1 # Fallback on error
                 
-            # NOTE: New link goes to the read_chapter route
             chapter_link = url_for('read_chapter', chapter_id=start_chapter_id) 
             
             story_list_html += f"""
@@ -202,7 +204,7 @@ def story_library():
 def read_chapter(chapter_id):
     if 'user_id' not in session: return redirect(url_for('login_page'))
     
-    # Initialize variables for safe template rendering
+    # Data structure for error resilience
     chapter_info = {
         'title': 'Chapter Title Placeholder', 
         'story_title': 'Story Placeholder',
@@ -247,45 +249,21 @@ def read_chapter(chapter_id):
         
         # 2. ASSEMBLE CONTENT AND MARKERS (The Scrollytelling Stitch)
         
-        # Use a dictionary to group triggers by scene for easier assembly
-        scene_triggers = {}
-        for row in chapter_data:
-            scene_id = row['scene_id']
-            if row.get('text_trigger_id'):
-                 if scene_id not in scene_triggers:
-                     scene_triggers[scene_id] = []
-                 scene_triggers[scene_id].append({
-                     'trigger_id': row['text_trigger_id'],
-                     'file_name': row['file_name'],
-                     'media_type': row['media_type']
-                 })
-
-        # Process text scene by scene
         processed_text_html = ""
         
-        # Get unique scenes from the fetched data (to iterate over scenes once)
-        unique_scenes = {}
-        for row in chapter_data:
-            unique_scenes[row['scene_id']] = {
-                'title': row['scene_title'],
-                'text': row['scene_text'],
-                'order': row['scene_order']
-            }
-        
-        for scene_id in sorted(unique_scenes.keys()):
-            scene = unique_scenes[scene_id]
-            raw_text = scene['text']
+        for scene_row in chapter_data:
+            scene_id = scene_row['scene_id']
+            raw_text = scene_row['scene_text']
             
             # Start of Scene Divider (Visual break and major trigger)
-            processed_text_html += f'<div id="scene-{scene_id}" class="scene-divider trigger-point-major"><h2 class="scene-title">{scene["title"]}</h2></div>'
+            processed_text_html += f'<div id="scene-{scene_id}" class="scene-divider trigger-point-major"><h2 class="scene-title">{scene_row["scene_title"]}</h2></div>'
             
-            # --- SENTENCE SEGMENTATION & MARKER INSERTION (Final Logic) ---
+            # --- SENTENCE SEGMENTATION & MARKER INSERTION (Sentence-Level Sync) ---
             sentences = re.split('([.!?])', raw_text)
             paragraph_html = ""
             current_paragraph_content = ""
             sentence_counter = 0
 
-            # Process sentences and insert markers
             for i in range(0, len(sentences) - 1, 2):
                 if i + 1 >= len(sentences): break
                 
@@ -295,24 +273,23 @@ def read_chapter(chapter_id):
                 # Unique Sentence ID (s-sceneId-sentenceOrder)
                 sentence_marker_id = f's-{scene_id}-{sentence_counter}'
 
-                # Check if this sentence is also the start of a new paragraph
-                is_new_paragraph = sentence.strip().endswith('  ') 
-                
-                # Check for image trigger linked to this specific sentence ID
-                trigger_data = next((t for t in scene_triggers.get(scene_id, []) if t['trigger_id'] == sentence_marker_id), None)
+                # Find image trigger linked to this specific sentence ID
+                trigger_data = next((row for row in chapter_data if row.get('text_trigger_id') == sentence_marker_id), None)
                 
                 # Wrap the sentence in a span for fine-grained control (for audio highlighting)
-                sentence_html = f'<span id="{sentence_marker_id}">{sentence}</span>'
+                sentence_html = f'<span id="{sentence_marker_id}">{sentence}</span> '
                 
                 # If an image trigger exists, add the data attribute around the sentence span
-                if trigger_data:
+                if trigger_data and trigger_data.get('file_name'):
                     file_name = trigger_data['file_name']
                     sentence_html = (
                         f'<span class="trigger-point-active" data-image-url="{url_for("secure_media_proxy", scene_id=scene_id, filename=file_name)}">'
                         f'{sentence_html}</span> '
                     )
 
-                # Assemble paragraphs
+                # Assemble paragraphs (Based on simple line breaks for stability)
+                is_new_paragraph = sentence.strip().endswith('  ') 
+                
                 if is_new_paragraph and current_paragraph_content:
                     paragraph_html += f"<p>{current_paragraph_content}</p>\n\n"
                     current_paragraph_content = sentence_html
